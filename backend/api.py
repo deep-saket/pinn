@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import json
 import logging
@@ -23,6 +23,12 @@ from surrogate_model import (
     evaluate_profile,
     train_surrogate,
 )
+from physics_nemo_adapter import (
+    NemoTrainingConfig,
+    PhysicsNemoAdapter,
+    PhysicsNemoUnavailable,
+    physics_nemo_available,
+)
 
 
 logger = logging.getLogger("geminus.backend")
@@ -39,6 +45,8 @@ OPT_JSON = EXPORT_DIR / "optimization_latest.json"
 OPT_XLSX = EXPORT_DIR / "optimization_latest.xlsx"
 TARGET_DIFFUSION = 0.12
 TARGET_VELOCITY = 0.65
+NEMO_ARTIFACT_DIR = ARTIFACT_DIR / "physics_nemo"
+NEMO_DATA_JSON = DATA_DIR / "surrogate_nemo_latest.json"
 
 
 def _dataset_to_dataframe(dataset: Dict[str, np.ndarray]) -> pd.DataFrame:
@@ -122,6 +130,10 @@ def _ensure_surrogate_ready() -> bool:
         reference = _build_reference_state(state["simulation_config"])
         _apply_reference_state(reference)
     return True
+
+
+def _get_nemo_adapter() -> PhysicsNemoAdapter:
+    return PhysicsNemoAdapter(DATA_DIR, NEMO_ARTIFACT_DIR)
     summary = pd.DataFrame(
         [
             {
@@ -288,6 +300,39 @@ class TrainSurrogateRequest(BaseModel):
     pde_weight: float = 0.1
 
 
+class PhysicsNemoTrainRequest(BaseModel):
+    epochs: int = 400
+    batch_size: int = 2048
+    collocation_points: int = 8192
+    boundary_points: int = 1536
+    initial_points: int = 1024
+    learning_rate: float = 5e-4
+    pde_weight: float = 1.0
+    ic_weight: float = 0.4
+    bc_weight: float = 0.2
+    hidden_dim: int = 128
+    hidden_layers: int = 6
+    activation: str = "tanh"
+    dataset_profiles: int = 8
+    export_onnx: bool = True
+    export_torchscript: bool = True
+    seed: Optional[int] = None
+    device: str = "auto"
+    length: float = 1.0
+    x_points: int = 64
+    profile_time: float = 0.6
+    gaussian_center: float = 0.35
+    gaussian_width: float = 0.08
+    diffusion_range: Tuple[float, float] = (0.01, 0.2)
+    velocity_range: Tuple[float, float] = (0.05, 1.2)
+
+    def to_dataclass(self) -> NemoTrainingConfig:
+        payload = self.dict()
+        payload["diffusion_range"] = tuple(payload["diffusion_range"])
+        payload["velocity_range"] = tuple(payload["velocity_range"])
+        return NemoTrainingConfig(**payload)
+
+
 class PredictRequest(BaseModel):
     x: list[float]
     t: float
@@ -332,6 +377,7 @@ state: Dict[str, Any] = {
     "training_history": None,
     "dataset_size": None,
     "last_trained_at": None,
+    "nemo_meta": None,
 }
 
 
@@ -601,6 +647,38 @@ async def surrogate_status() -> SurrogateStatusResponse:
         training_history=history,
         sample_prediction=sample_prediction,
     )
+
+
+@app.post("/physics-nemo/run")
+async def physics_nemo_run(request: PhysicsNemoTrainRequest) -> Dict[str, Any]:
+    adapter = _get_nemo_adapter()
+    try:
+        result = adapter.run_pipeline(request.to_dataclass())
+    except PhysicsNemoUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    state["nemo_meta"] = adapter.load_meta()
+    logger.info("PhysicsNeMo pipeline completed: dataset=%s model=%s", result.dataset_path, result.model_path)
+    return {
+        "message": "PhysicsNeMo surrogate generated",
+        **result.to_dict(),
+    }
+
+
+@app.get("/physics-nemo/status")
+async def physics_nemo_status() -> Dict[str, Any]:
+    adapter = _get_nemo_adapter()
+    meta = adapter.load_meta()
+    if meta is None:
+        raise HTTPException(status_code=404, detail="PhysicsNeMo pipeline has not been executed yet.")
+    meta["engine_available"] = physics_nemo_available()
+    return meta
+
+
+@app.get("/physics-nemo/dataset")
+async def physics_nemo_dataset() -> Dict[str, Any]:
+    if not NEMO_DATA_JSON.exists():
+        raise HTTPException(status_code=404, detail="No PhysicsNeMo dataset available. Run /physics-nemo/run first.")
+    return json.loads(NEMO_DATA_JSON.read_text())
 
 
 @app.get("/optimize/history")

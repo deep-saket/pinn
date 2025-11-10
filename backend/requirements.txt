@@ -5,3 +5,5 @@ torch==2.2.2
 matplotlib==3.8.4
 pandas==2.2.2
 openpyxl==3.1.5
+# Optional NVIDIA PhysicsNeMo PINN stack (installs PyTorch + ONNX tooling)
+nvidia-physicsnemo==1.2.0
