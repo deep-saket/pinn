@@ -29,6 +29,7 @@ from physics_nemo_adapter import (
     PhysicsNemoUnavailable,
     physics_nemo_available,
 )
+from omniverse_export import export_pressure_profiles_to_usd
 
 
 logger = logging.getLogger("geminus.backend")
@@ -134,6 +135,51 @@ def _ensure_surrogate_ready() -> bool:
 
 def _get_nemo_adapter() -> PhysicsNemoAdapter:
     return PhysicsNemoAdapter(DATA_DIR, NEMO_ARTIFACT_DIR)
+
+
+def _compute_sample_prediction() -> Optional[Dict[str, Any]]:
+    has_model = MODEL_PATH.exists() or state.get("surrogate") is not None
+    if not has_model:
+        return None
+    try:
+        surrogate = _get_surrogate_or_load()
+    except HTTPException:
+        return None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to load surrogate for preview: %s", exc)
+        return None
+
+    x_grid = state.get("x_grid")
+    if x_grid is not None and len(x_grid) > 0:
+        sample_x = np.array(x_grid, dtype=np.float32)
+    else:
+        sim_cfg: SimulationConfig = state["simulation_config"]
+        sample_x = np.linspace(0.0, sim_cfg.length, 64, dtype=np.float32)
+
+    if sample_x.size > 128:
+        stride = int(np.ceil(sample_x.size / 128))
+        sample_x = sample_x[::stride]
+
+    t_val = state.get("target_time") or 0.0
+    params = state.get("target_params") or {
+        "D": state["simulation_config"].diffusion_range[0],
+        "v": state["simulation_config"].velocity_range[0],
+    }
+    preds = evaluate_profile(
+        surrogate,
+        x=sample_x,
+        t=float(t_val),
+        D=float(params["D"]),
+        v=float(params["v"]),
+        device="cpu",
+    )
+    return {
+        "x": sample_x.tolist(),
+        "u_hat": preds.tolist(),
+        "t": float(t_val),
+        "D": float(params["D"]),
+        "v": float(params["v"]),
+    }
     summary = pd.DataFrame(
         [
             {
@@ -348,6 +394,15 @@ class SurrogateStatusResponse(BaseModel):
     last_trained_at: Optional[str]
     training_history: Optional[List[Dict[str, Any]]]
     sample_prediction: Optional[Dict[str, Any]]
+
+
+class OmniverseExportRequest(BaseModel):
+    include_target: bool = True
+    include_surrogate: bool = True
+    include_optimization: bool = True
+    include_nemo_profiles: bool = False
+    z_scale: float = 1.0
+    output_path: Optional[str] = None
 
 
 app = FastAPI(title="Dummy Geminus Optimization API")
@@ -598,45 +653,8 @@ async def surrogate_status() -> SurrogateStatusResponse:
     if last_trained_at is None and TRAINING_LOG_PATH.exists():
         last_trained_at = datetime.fromtimestamp(TRAINING_LOG_PATH.stat().st_mtime, tz=timezone.utc).isoformat()
 
-    sample_prediction = None
-    has_model = MODEL_PATH.exists() or state.get("surrogate") is not None
-    if has_model:
-        try:
-            surrogate = _get_surrogate_or_load()
-            x_grid = state.get("x_grid")
-            if x_grid is not None and len(x_grid) > 0:
-                sample_x = np.array(x_grid, dtype=np.float32)
-            else:
-                sim_cfg: SimulationConfig = state["simulation_config"]
-                sample_x = np.linspace(0.0, sim_cfg.length, 64, dtype=np.float32)
-
-            if sample_x.size > 64:
-                sample_x = sample_x[:: int(np.ceil(sample_x.size / 64))]
-
-            t_val = state.get("target_time") or 0.0
-            params = state.get("target_params") or {
-                "D": state["simulation_config"].diffusion_range[0],
-                "v": state["simulation_config"].velocity_range[0],
-            }
-            preds = evaluate_profile(
-                surrogate,
-                x=sample_x,
-                t=float(t_val),
-                D=float(params["D"]),
-                v=float(params["v"]),
-                device="cpu",
-            )
-            sample_prediction = {
-                "x": sample_x.tolist(),
-                "u_hat": preds.tolist(),
-                "t": float(t_val),
-                "D": float(params["D"]),
-                "v": float(params["v"]),
-            }
-        except HTTPException:
-            pass
-        except Exception as exc:
-            logger.warning("Failed to compute surrogate status prediction: %s", exc)
+    sample_prediction = _compute_sample_prediction()
+    has_model = sample_prediction is not None or MODEL_PATH.exists()
 
     return SurrogateStatusResponse(
         has_model=has_model,
@@ -679,6 +697,118 @@ async def physics_nemo_dataset() -> Dict[str, Any]:
     if not NEMO_DATA_JSON.exists():
         raise HTTPException(status_code=404, detail="No PhysicsNeMo dataset available. Run /physics-nemo/run first.")
     return json.loads(NEMO_DATA_JSON.read_text())
+
+
+@app.post("/omniverse/export")
+async def omniverse_export(request: OmniverseExportRequest) -> Dict[str, Any]:
+    x_grid = state.get("x_grid")
+    if x_grid is None:
+        raise HTTPException(status_code=400, detail="No spatial grid available. Run /simulate first.")
+
+    x_coords = [float(x) for x in np.array(x_grid, dtype=np.float32)]
+    curves: List[Dict[str, object]] = []
+
+    if request.include_target and state.get("target_profile") is not None:
+        curves.append(
+            {
+                "name": "TargetProfile",
+                "values": state["target_profile"],
+                "color": (1.0, 0.3, 0.3),
+                "description": "Finite-difference target",
+            }
+        )
+
+    if request.include_surrogate:
+        try:
+            surrogate = _get_surrogate_or_load()
+            params = state.get("target_params") or {
+                "D": state["simulation_config"].diffusion_range[0],
+                "v": state["simulation_config"].velocity_range[0],
+            }
+            predictions = evaluate_profile(
+                surrogate,
+                x=np.array(x_coords, dtype=np.float32),
+                t=float(state.get("target_time") or 0.0),
+                D=float(params["D"]),
+                v=float(params["v"]),
+                device="cpu",
+            )
+            curves.append(
+                {
+                    "name": "SurrogatePreview",
+                    "values": predictions.tolist(),
+                    "color": (0.1, 0.6, 1.0),
+                    "description": "Current surrogate prediction",
+                }
+            )
+        except HTTPException:
+            pass
+        except Exception as exc:
+            logger.warning("Unable to evaluate surrogate for Omniverse export: %s", exc)
+
+    if request.include_optimization:
+        profile = None
+        description = ""
+        history = state.get("history") or []
+        if history:
+            latest = history[-1]
+            profile = latest.get("u_profile")
+            description = f"Iteration {latest.get('iteration')} cost={latest.get('cost', 0):.3f}"
+        elif state.get("result"):
+            profile = state["result"].get("best_profile")
+            description = "Optimization result"
+        if profile is not None:
+            curves.append(
+                {
+                    "name": "OptimizationProfile",
+                    "values": profile,
+                    "color": (0.2, 1.0, 0.6),
+                    "description": description or "Optimizer trajectory",
+                }
+            )
+
+    if request.include_nemo_profiles:
+        meta = _get_nemo_adapter().load_meta()
+        if meta:
+            profiles = meta.get("result", {}).get("profiles", [])
+            for idx, profile in enumerate(profiles):
+                xs = profile.get("x")
+                us = profile.get("u")
+                if not xs or not us or len(xs) != len(us):
+                    continue
+                y_offset = 0.15 + idx * 0.05
+                points = [(float(x), y_offset, float(u) * request.z_scale) for x, u in zip(xs, us)]
+                curves.append(
+                    {
+                        "name": f"NemoProfile_{idx}",
+                        "points": points,
+                        "color": (0.9, 0.8, 0.2),
+                        "description": f"PhysicsNeMo sample D={profile.get('D',[0])[0]:.3f} v={profile.get('v',[0])[0]:.3f}",
+                    }
+                )
+
+    if not curves:
+        raise HTTPException(status_code=400, detail="No data available to export.")
+
+    output_path = Path(request.output_path).expanduser() if request.output_path else EXPORT_DIR / "omniverse_pressure.usda"
+    metadata = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "curve_count": len(curves),
+        "z_scale": request.z_scale,
+    }
+    export_pressure_profiles_to_usd(
+        x_coords,
+        curves,
+        output_path,
+        z_scale=request.z_scale,
+        metadata=metadata,
+    )
+    logger.info("Omniverse USD exported to %s with %d curve(s)", output_path, len(curves))
+    return {
+        "message": "Omniverse USD exported",
+        "path": str(output_path),
+        "curves": [curve["name"] for curve in curves],
+    }
 
 
 @app.get("/optimize/history")
