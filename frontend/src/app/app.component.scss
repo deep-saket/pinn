@@ -1,0 +1,39 @@
+:host {
+  display: block;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #f0f4ff 0%, #fdfbff 100%);
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:host-context(.dark-theme) {
+  background: radial-gradient(circle at top, #0f172a 0%, #020617 60%, #000 100%);
+}
+
+.app-shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+}
+
+header {
+  margin-bottom: 1rem;
+
+  h1 {
+    margin: 0;
+    font-size: 2rem;
+    color: #14213d;
+  }
+
+  p {
+    margin: 0.25rem 0 0;
+    color: #495057;
+  }
+}
+
+:host-context(.dark-theme) header h1 {
+  color: #e2e8f0;
+}
+
+:host-context(.dark-theme) header p {
+  color: #cbd5f5;
+}

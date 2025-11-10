@@ -1,0 +1,91 @@
+.result-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  h2 {
+    margin: 0;
+  }
+}
+
+:host {
+  display: block;
+}
+
+.status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+
+  h2 {
+    margin: 0;
+  }
+
+  .status-chip {
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    background: #adb5bd;
+    color: #fff;
+    font-weight: 600;
+
+    &.running {
+      background: #2a9d8f;
+    }
+  }
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+
+.metric {
+  background: #f7f9fc;
+  border-radius: 8px;
+  padding: 0.75rem;
+  text-align: center;
+
+  .label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #6c757d;
+  }
+
+  .value {
+    font-size: 1.25rem;
+    font-weight: 700;
+  }
+}
+
+:host-context(.dark-theme) .metric {
+  background: #1f2a44;
+  border: 1px solid #2c3550;
+}
+
+:host-context(.dark-theme) .metric .label {
+  color: #cbd5f5;
+}
+
+:host-context(.dark-theme) .status-chip {
+  background: #475569;
+}
+
+:host-context(.dark-theme) .status-chip.running {
+  background: #16a34a;
+}
+
+.summary {
+  border-top: 1px solid #e0e3ea;
+  padding-top: 0.75rem;
+
+  h3 {
+    margin: 0 0 0.25rem 0;
+  }
+
+  p {
+    margin: 0;
+  }
+}

@@ -1,0 +1,313 @@
+.dashboard-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.theme-toggle {
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid #1b9aaa;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dashboard-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.theme-toggle {
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid #1b9aaa;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dashboard-layout {
+  display: grid;
+  grid-template-columns: 320px 200px minmax(0, 1fr);
+  grid-template-areas:
+    'optimization optimization optimization'
+    'controls actions pressure'
+    'surrogate surrogate cost'
+    'logs logs loss'
+    'logs logs grad';
+  gap: 1.5rem;
+  padding: 1.5rem;
+}
+
+.panel {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel h2 {
+  margin: 0 0 0.5rem 0;
+  color: #1c3553;
+}
+
+.panel.controls {
+  grid-area: controls;
+}
+
+.panel.actions {
+  grid-area: actions;
+}
+
+.pressure-chart {
+  grid-area: pressure;
+}
+
+.surrogate-panel {
+  grid-area: surrogate;
+}
+
+.optimization-panel {
+  grid-area: optimization;
+}
+
+.theme-toggle {
+  position: absolute;
+  top: 1rem;
+  right: 1.5rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid #1b9aaa;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cost-chart {
+  grid-area: cost;
+}
+
+.loss-chart {
+  grid-area: loss;
+}
+
+.grad-chart {
+  grid-area: grad;
+  min-width: 0;
+}
+
+.panel.controls .control-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.panel.controls .control-row label {
+  font-weight: 600;
+  margin-right: 0.5rem;
+}
+
+.panel.controls .control-row input[type='number'] {
+  width: 100px;
+}
+
+.panel.controls .control-row.sliders {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.panel.controls .control-row.sliders input {
+  width: 100%;
+}
+
+.panel.actions .button-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.panel.actions button {
+  width: 100%;
+  padding: 0.45rem;
+  border-radius: 6px;
+  border: none;
+  background: #1b9aaa;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.panel.actions button:disabled {
+  background: #b3c1c9;
+  cursor: not-allowed;
+}
+
+.panel.actions .error {
+  margin-top: 0.5rem;
+  color: #e63946;
+  font-size: 0.9rem;
+}
+
+.surrogate-panel .status {
+  font-weight: 600;
+  color: #dc2f02;
+  margin-bottom: 0.5rem;
+}
+
+.surrogate-panel .status.ready {
+  color: #2a9d8f;
+}
+
+.surrogate-panel .status-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  color: #495057;
+  margin-bottom: 0.75rem;
+}
+
+.optimization-panel app-result-panel {
+  flex: 1;
+}
+
+.surrogate-meta {
+  background: #f1f8ff;
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.chart .chart-canvas {
+  height: 260px;
+  width: 100%;
+}
+
+.axis-legend {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+  color: inherit;
+  opacity: 0.8;
+}
+
+.chart canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.chart .chart-note {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  color: #6c757d;
+}
+
+.chart .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.chart button.link-button {
+  background: none;
+  border: none;
+  color: #1b9aaa;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chart .hint {
+  font-size: 0.85rem;
+  color: #6c757d;
+  margin-top: 0.75rem;
+}
+
+.logs .log-list {
+  max-height: 180px;
+  overflow-y: auto;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 0.85rem;
+  padding-right: 0.5rem;
+}
+
+.logs-panel {
+  grid-area: logs;
+}
+
+@media (max-width: 900px) {
+  .dashboard-layout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'controls'
+      'actions'
+      'pressure'
+      'surrogate'
+      'optimization'
+      'logs'
+      'cost'
+      'loss'
+      'grad';
+  }
+}
+
+
+
+body.dark-theme .panel {
+  background: #141c2e;
+  color: #e2e8f0;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+body.dark-theme .panel.actions button {
+  background: #2563eb;
+  color: #f8fafc;
+  border: 1px solid #1d4ed8;
+}
+
+body.dark-theme .panel.actions button:disabled {
+  background: #334155;
+}
+
+body.dark-theme .surrogate-panel .status {
+  color: #fbbf24;
+}
+
+body.dark-theme .surrogate-panel .status-details {
+  color: #cbd5f5;
+}
+
+body.dark-theme .theme-toggle {
+  border-color: #94a3b8;
+  color: #e2e8f0;
+}
+
+body.dark-theme .chart .chart-canvas {
+  background: #0b1220;
+  border-radius: 10px;
+  border: 1px solid #1f2a3f;
+}
+
+body.dark-theme .logs .log-list {
+  background: #0f172a;
+  color: #e2e8f0;
+}

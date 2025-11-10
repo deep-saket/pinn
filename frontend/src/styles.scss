@@ -1,0 +1,59 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f2f4f8;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #1f2933;
+}
+
+body.dark-theme {
+  background: #050a18;
+  color: #e2e8f0;
+}
+
+body.dark-theme .dashboard-page .panel {
+  background: #161f33;
+  color: inherit;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+body.dark-theme .dashboard-page .panel h2 {
+  color: #f8fafc;
+}
+
+body.dark-theme .dashboard-page .panel.actions button {
+  background: #2563eb;
+  border: 1px solid #1d4ed8;
+}
+
+body.dark-theme .dashboard-page .panel.actions button:disabled {
+  background: #334155;
+  color: #cbd5f5;
+}
+
+body.dark-theme .dashboard-page .surrogate-panel .status {
+  color: #fbbf24;
+}
+
+body.dark-theme .dashboard-page .surrogate-panel .status-details {
+  color: #cbd5f5;
+}
+
+body.dark-theme .dashboard-page .theme-toggle {
+  border-color: #94a3b8;
+  color: #f1f5f9;
+}
+
+body.dark-theme .dashboard-page .chart .chart-canvas {
+  background: #0b1220;
+  border-radius: 10px;
+  border: 1px solid #1f2a3f;
+}
+
+body.dark-theme .dashboard-page .logs .log-list {
+  background: #0f172a;
+  color: #e2e8f0;
+}

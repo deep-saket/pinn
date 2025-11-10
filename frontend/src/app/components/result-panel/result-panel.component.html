@@ -1,0 +1,22 @@
+<div class="result-panel">
+  <div class="status-header">
+    <h2>Optimization Status</h2>
+    <div class="status-chip" [class.running]="running">{{ running ? 'Running' : 'Idle' }}</div>
+  </div>
+
+  <div class="metric-grid">
+    <div class="metric">
+      <span class="label">D</span>
+      <span class="value">{{ formatValue(currentIteration?.D ?? finalResult?.best_params?.D) }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">v</span>
+      <span class="value">{{ formatValue(currentIteration?.v ?? finalResult?.best_params?.v) }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">Cost</span>
+      <span class="value">{{ formatValue(currentIteration?.cost ?? finalResult?.best_cost, 4) }}</span>
+    </div>
+  </div>
+
+</div>
