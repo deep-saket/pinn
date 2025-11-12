@@ -24,12 +24,17 @@ body.dark-theme .dashboard-page .panel h2 {
   color: #f8fafc;
 }
 
-body.dark-theme .dashboard-page .panel.actions button {
+body.dark-theme .dashboard-page .control-block {
+  background: rgba(30, 41, 59, 0.6);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+body.dark-theme .dashboard-page .actions-panel button {
   background: #2563eb;
   border: 1px solid #1d4ed8;
 }
 
-body.dark-theme .dashboard-page .panel.actions button:disabled {
+body.dark-theme .dashboard-page .actions-panel button:disabled {
   background: #334155;
   color: #cbd5f5;
 }
@@ -56,4 +61,42 @@ body.dark-theme .dashboard-page .chart .chart-canvas {
 body.dark-theme .dashboard-page .logs .log-list {
   background: #0f172a;
   color: #e2e8f0;
+}
+
+body.dark-theme .dashboard-page .pipeline-metrics {
+  background: rgba(15, 118, 110, 0.4);
+  color: #e2e8f0;
+}
+
+body.dark-theme .dashboard-page .action-group {
+  background: rgba(15, 23, 42, 0.5);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+body.dark-theme .dashboard-page .action-group h3 {
+  color: #f8fafc;
+}
+
+body.dark-theme .dashboard-page .system-actions button {
+  background: #2563eb;
+  border: 1px solid #1d4ed8;
+}
+
+body.dark-theme .dashboard-page .surrogate-actions button {
+  background: #2563eb;
+  border: 1px solid #1d4ed8;
+}
+
+body.dark-theme .dashboard-page .facility-status {
+  color: #cbd5f5;
+}
+
+body.dark-theme .dashboard-page .facility-opt-summary {
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+body.dark-theme .dashboard-page .status-overlay {
+  background: rgba(15, 23, 42, 0.9);
+  color: #f8fafc;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
 }

@@ -14,19 +14,29 @@ import Chart from 'chart.js/auto';
 import {
   BackendService,
   BackendStreamMessage,
+  FacilityOptimizeHistoryEntry,
+  FacilityOptimizeResult,
+  FacilityOptimizeStatus,
+  FacilityStatus,
   IterationPayload,
   OptimizationHistoryResponse,
   OptimizationResult,
+  PipelineRunResponse,
   SimulateResponse,
   SurrogateStatus,
   TrainingHistoryEntry,
 } from '../../services/backend.service';
-import { ResultPanelComponent } from '../result-panel/result-panel.component';
 
+type FacilityHistoryEntry = {
+  epoch: number;
+  train_loss?: number | null;
+  train_total_loss?: number | null;
+  val_loss?: number | null;
+};
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [CommonModule, FormsModule, ResultPanelComponent],
+  imports: [CommonModule, FormsModule],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })
@@ -35,14 +45,29 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
   @ViewChild('costCanvas') costCanvas?: ElementRef<HTMLCanvasElement>;
   @ViewChild('lossCanvas') lossCanvas?: ElementRef<HTMLCanvasElement>;
   @ViewChild('gradCanvas') gradCanvas?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('spatialGradientCanvas') spatialGradientCanvas?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('statusPanel') statusPanel?: ElementRef<HTMLDivElement>;
 
-  controls = {
-    numSystems: 10,
+  pipelineControls = {
+    separatorPressure: 100,
+    separatorTemp: 45,
+    gasFraction: 0.5,
+  };
+
+  pipeTargets = {
+    outletPressure: 185,
+    meanPressure: 150,
+    outletGradient: 0.0,
+  };
+
+  surrogateSimControls = {
+    numSystems: 12,
     seed: undefined as number | undefined,
+  };
+
+  optimizationControls = {
     maxIters: 30,
     population: 24,
-    initialD: 0.08,
-    initialV: 0.5,
   };
 
   surrogateReady = false;
@@ -52,22 +77,73 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
   finalResult: OptimizationResult | null = null;
   xGrid: number[] = [];
   targetProfile: number[] = [];
+  optimizerProfile: number[] = [];
   currentProfile: number[] = [];
+  surrogatePreviewProfile: number[] = [];
+  targetGradientProfile: number[] = [];
+  optimizerGradientProfile: number[] = [];
+  surrogateGradientPreview: number[] = [];
   surrogateStatus?: SurrogateStatus;
+  facilityStatus?: FacilityStatus;
   trainingHistory: TrainingHistoryEntry[] = [];
+  facilityTrainingHistory: FacilityHistoryEntry[] = [];
+  facilityOptimizationHistory: FacilityOptimizeHistoryEntry[] = [];
+  facilityOptimizationResult: FacilityOptimizeResult | null = null;
+  facilityOptimizationTimestamp: string | null = null;
+  facilityPipeContext: { outlet_pressure: number; temperature: number; throughput: number } | null = null;
   statusLog: string[] = [];
   errorMessage = '';
+  facilityError = '';
+  facilityOptError = '';
+  facilityTraining = {
+    numSamples: 2000,
+    epochs: 150,
+    batchSize: 256,
+    learningRate: 1e-3,
+    valSplit: 0.2,
+  };
+  facilityOptimizationControls = {
+    maxIters: 20,
+    population: 20,
+  };
+  facilityObjectives = {
+    vaporFraction: 0.65,
+    gasFlow: 18,
+    liquidFlow: 20,
+  };
+  facilityOptimizerBusy = false;
+  pipelinePreview: PipelineRunResponse | null = null;
+  stageView: 'pipe' | 'facility' = 'pipe';
+  statusOverlay: { stage: 'pipe' | 'facility'; x: number; y: number } | null = null;
+
+  setStage(view: 'pipe' | 'facility'): void {
+    if (this.stageView === view) {
+      return;
+    }
+    this.stageView = view;
+    this.statusOverlay = null;
+    this.refreshCharts();
+  }
+
+  private refreshCharts(): void {
+    this.updatePressureChart();
+    this.updateSpatialGradientChart();
+    this.updateCostChart();
+    this.updateGradientChart();
+  }
 
   private pressureChart?: Chart;
   private costChart?: Chart;
   private lossChart?: Chart;
   private gradChart?: Chart;
+  private gradProfileChart?: Chart;
   private costSeries: number[] = [];
   private iterationLabels: string[] = [];
   private gradLabels: string[] = [];
   private gradDSeries: (number | null)[] = [];
   private gradVSeries: (number | null)[] = [];
   private streamSub?: Subscription;
+  private readonly defaultPipeGuess = { D: 0.08, v: 0.5 };
 
   constructor(private readonly backend: BackendService) {}
 
@@ -77,6 +153,8 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
       error: () => this.logMessage('WebSocket connection closed.'),
     });
     this.refreshSurrogateStatus();
+    this.refreshFacilityStatus();
+    this.refreshFacilityOptimizationStatus();
     this.loadOptimizationHistory();
   }
 
@@ -84,6 +162,11 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.initCharts();
     this.applyThemeToCharts();
     this.updateBodyTheme();
+    this.updatePressureChart();
+    this.updateSpatialGradientChart();
+    this.updateLossChart();
+    this.costChart?.update();
+    this.gradChart?.update();
   }
 
   ngOnDestroy(): void {
@@ -91,13 +174,16 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.backend.closeStream();
     this.pressureChart?.destroy();
     this.costChart?.destroy();
+    this.lossChart?.destroy();
+    this.gradChart?.destroy();
+    this.gradProfileChart?.destroy();
     document.body.classList.remove('dark-theme');
   }
 
   simulateAndTrain(): void {
     this.errorMessage = '';
     this.backend
-      .simulateAndTrain(this.controls.numSystems, this.controls.seed)
+      .simulateAndTrain(this.surrogateSimControls.numSystems, this.surrogateSimControls.seed)
       .subscribe({
         next: (response: SimulateResponse) => {
           this.handleTrainingResponse(response);
@@ -120,17 +206,24 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.gradLabels = [];
     this.gradDSeries = [];
     this.gradVSeries = [];
+    this.optimizerProfile = [];
+    this.optimizerGradientProfile = [];
+    this.updatePressureChart();
+    this.updateSpatialGradientChart();
     this.latestIteration = undefined;
     this.finalResult = null;
     this.costChart?.update();
     this.gradChart?.update();
     this.backend
-      .startOptimization(
-        this.controls.maxIters,
-        this.controls.population,
-        this.controls.initialD,
-        this.controls.initialV,
-      )
+      .startOptimization({
+        max_iters: this.optimizationControls.maxIters,
+        population: this.optimizationControls.population,
+        target_outlet_pressure: this.pipeTargets.outletPressure,
+        target_mean_pressure: this.pipeTargets.meanPressure,
+        target_gradient: this.pipeTargets.outletGradient,
+        initial_D: this.defaultPipeGuess.D,
+        initial_V: this.defaultPipeGuess.v,
+      })
       .subscribe({
         next: () => {
           this.running = true;
@@ -169,11 +262,14 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
           this.updateLossChart();
         }
         if (status.sample_prediction) {
-          this.xGrid = status.sample_prediction.x;
-          this.currentProfile = status.sample_prediction.u_hat;
-          if (status.sample_prediction.u_hat?.length) {
-            this.updatePressureChart(status.sample_prediction.u_hat);
+          if (status.sample_prediction.x?.length) {
+            this.xGrid = status.sample_prediction.x;
+            this.targetGradientProfile = this.computeGradientFromProfile(this.targetProfile);
           }
+          this.surrogatePreviewProfile = status.sample_prediction.u_hat ?? [];
+          this.surrogateGradientPreview = status.sample_prediction.du_dx ?? [];
+          this.updatePressureChart();
+          this.updateSpatialGradientChart();
         }
       },
       error: () => {
@@ -194,6 +290,172 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         this.logMessage('No saved optimization history found.');
       },
     });
+  }
+
+  simulateFacilityDataset(): void {
+    this.facilityError = '';
+    this.backend
+      .facilitySimulate(this.facilityTraining.numSamples)
+      .subscribe({
+        next: (response) => {
+          this.logMessage(`Facility dataset generated with ${response.dataset_size} samples.`);
+          this.refreshFacilityStatus();
+        },
+        error: () => {
+          this.facilityError = 'Failed to simulate facility dataset.';
+        },
+      });
+  }
+
+  trainFacilitySurrogate(): void {
+    this.facilityError = '';
+    this.backend
+      .facilityTrain({
+        epochs: this.facilityTraining.epochs,
+        batch_size: this.facilityTraining.batchSize,
+        learning_rate: this.facilityTraining.learningRate,
+        val_split: this.facilityTraining.valSplit,
+      })
+      .subscribe({
+        next: () => {
+          this.logMessage('Facility surrogate trained.');
+          this.refreshFacilityStatus();
+        },
+        error: () => {
+          this.facilityError = 'Failed to train facility surrogate.';
+        },
+      });
+  }
+
+  refreshFacilityStatus(): void {
+    this.backend.fetchFacilityStatus().subscribe({
+      next: (status) => {
+        this.facilityStatus = status;
+        const rawHistory = status.training_history ?? [];
+        this.facilityTrainingHistory = rawHistory.map((entry: any) => ({
+          epoch: entry.epoch,
+          train_loss: entry.train_loss ?? entry.train_total_loss ?? entry.total_loss ?? null,
+          val_loss: entry.val_loss ?? entry.val_total_loss ?? null,
+        }));
+        if (this.stageView === 'facility') {
+          this.updateCostChart();
+          this.updateGradientChart();
+        }
+      },
+      error: () => {
+        this.logMessage('Unable to fetch facility status.');
+      },
+    });
+  }
+
+  refreshFacilityOptimizationStatus(): void {
+    this.backend.fetchFacilityOptimizationStatus().subscribe({
+      next: (status: FacilityOptimizeStatus) => {
+        this.facilityOptimizationHistory = status.history ?? [];
+        this.facilityOptimizationResult = status.result ?? null;
+        this.facilityOptimizationTimestamp = status.timestamp ?? null;
+        this.facilityPipeContext = status.pipe_context ?? null;
+        this.updateCostChart();
+        this.updateGradientChart();
+      },
+      error: () => {
+        this.logMessage('Unable to fetch facility optimization status.');
+      },
+    });
+  }
+
+  runPipeline(): void {
+    this.facilityError = '';
+    const pipeInputs = this.resolvePipeInputs();
+    this.backend
+      .runPipeline({
+        D: pipeInputs.D,
+        v: pipeInputs.v,
+        t: this.stateTargetTime(),
+        separator_pressure: this.pipelineControls.separatorPressure,
+        separator_temp: this.pipelineControls.separatorTemp,
+        gas_fraction: this.pipelineControls.gasFraction,
+      })
+      .subscribe({
+        next: (response) => {
+          this.pipelinePreview = response;
+          this.logMessage('Pipeline evaluated.');
+          if (response.pipe?.profile) {
+            this.optimizerProfile = response.pipe.profile;
+          }
+          this.refreshCharts();
+        },
+        error: () => {
+          this.facilityError = 'Pipeline run failed. Ensure both surrogates are trained.';
+        },
+      });
+  }
+
+  optimizeFacility(): void {
+    if (this.facilityOptimizerBusy) {
+      return;
+    }
+    this.facilityOptError = '';
+    this.facilityOptimizerBusy = true;
+    const pipeInputs = this.resolvePipeInputs();
+    this.backend
+      .optimizeFacility({
+        max_iters: this.facilityOptimizationControls.maxIters,
+        population: this.facilityOptimizationControls.population,
+        initial_separator_pressure: this.pipelineControls.separatorPressure,
+        initial_separator_temp: this.pipelineControls.separatorTemp,
+        initial_gas_fraction: this.pipelineControls.gasFraction,
+        target_vapor_fraction: this.facilityObjectives.vaporFraction,
+        target_gas_flow_rate: this.facilityObjectives.gasFlow,
+        target_liquid_flow_rate: this.facilityObjectives.liquidFlow,
+        pipe_D: pipeInputs.D,
+        pipe_v: pipeInputs.v,
+        pipe_t: this.stateTargetTime(),
+      })
+      .subscribe({
+        next: (response) => {
+          this.facilityOptimizationHistory = response.history;
+          this.facilityOptimizationResult = response.result;
+          this.facilityOptimizationTimestamp = response.timestamp;
+          this.facilityPipeContext = response.pipe_context;
+          this.facilityOptimizerBusy = false;
+          this.logMessage('Facility optimization complete.');
+          this.updateCostChart();
+          this.updateGradientChart();
+        },
+        error: () => {
+          this.facilityOptimizerBusy = false;
+          this.facilityOptError = 'Failed to optimize facility.';
+        },
+      });
+  }
+
+  private stateTargetTime(): number {
+    if (this.surrogateStatus?.sample_prediction?.t !== undefined) {
+      return this.surrogateStatus.sample_prediction.t;
+    }
+    return 0.6;
+  }
+
+  private resolvePipeInputs(): { D: number; v: number } {
+    if (this.finalResult?.best_params) {
+      return {
+        D: this.finalResult.best_params.D,
+        v: this.finalResult.best_params.v,
+      };
+    }
+    const preview = this.surrogateStatus?.sample_prediction;
+    if (preview) {
+      return {
+        D: preview.D ?? this.defaultPipeGuess.D,
+        v: preview.v ?? this.defaultPipeGuess.v,
+      };
+    }
+    return { ...this.defaultPipeGuess };
+  }
+
+  get pipePreviewParams(): { D: number; v: number } {
+    return this.resolvePipeInputs();
   }
 
   private initCharts(): void {
@@ -247,6 +509,13 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
               label: 'Cost',
               data: [],
               borderColor: '#06d6a0',
+              tension: 0.2,
+            },
+            {
+              label: '',
+              data: [],
+              borderColor: '#2563eb',
+              borderDash: [4, 2],
               tension: 0.2,
             },
           ],
@@ -320,6 +589,13 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
               borderColor: '#faa307',
               tension: 0.2,
             },
+            {
+              label: '∂J/∂Gas',
+              data: [],
+              borderColor: '#0ea5e9',
+              borderDash: [4, 3],
+              tension: 0.2,
+            },
           ],
         },
         options: {
@@ -337,21 +613,93 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
       });
     }
 
+    if (this.spatialGradientCanvas && !this.gradProfileChart) {
+      this.gradProfileChart = new Chart(this.spatialGradientCanvas.nativeElement, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [
+            {
+              label: '∂u/∂x target',
+              data: [],
+              borderColor: '#ef476f',
+              borderDash: [6, 3],
+              tension: 0.2,
+            },
+            {
+              label: '∂u/∂x surrogate',
+              data: [],
+              borderColor: '#118ab2',
+              tension: 0.2,
+            },
+            {
+              label: '∂u/∂x optimizer',
+              data: [],
+              borderColor: '#06d6a0',
+              borderDash: [4, 2],
+              tension: 0.2,
+            },
+          ],
+        },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: 'x' } },
+            y: { title: { display: true, text: '∂u/∂x' } },
+          },
+        },
+      });
+    }
+
   }
 
-  private updatePressureChart(currentProfile: number[]): void {
+  private updatePressureChart(currentProfile?: number[]): void {
     if (!this.pressureChart) {
       this.initCharts();
     }
     if (!this.pressureChart) {
       return;
     }
-    this.pressureChart.data.labels = this.xGrid;
-    this.pressureChart.data.datasets[0].data = this.targetProfile ?? [];
-    this.pressureChart.data.datasets[1].data = currentProfile;
-    this.pressureChart.data.datasets[2].data = this.currentProfile ?? [];
+    if (this.stageView === 'pipe') {
+      if (currentProfile?.length) {
+        this.currentProfile = currentProfile;
+      }
+      const preview = this.surrogatePreviewProfile ?? [];
+      const optimizerData = this.optimizerProfile ?? [];
+      this.pressureChart.data.labels = this.xGrid;
+      this.pressureChart.data.datasets[0].label = 'Target profile';
+      this.pressureChart.data.datasets[0].data = this.targetProfile ?? [];
+      if (this.pressureChart.data.datasets[1]) {
+        this.pressureChart.data.datasets[1].label = 'Surrogate preview';
+        this.pressureChart.data.datasets[1].data = preview;
+      }
+      if (this.pressureChart.data.datasets[2]) {
+        this.pressureChart.data.datasets[2].label = 'Optimizer profile';
+        this.pressureChart.data.datasets[2].data = this.currentProfile ?? optimizerData;
+      }
+    } else {
+      const facility = this.pipelinePreview?.facility;
+      const labels = ['Vapor Fraction', 'Gas Flow', 'Liquid Flow'];
+      const values = [
+        facility?.vapor_fraction ?? 0,
+        facility?.gas_flow_rate ?? 0,
+        facility?.liquid_flow_rate ?? 0,
+      ];
+      this.pressureChart.data.labels = labels;
+      this.pressureChart.data.datasets[0].label = 'Facility outputs';
+      this.pressureChart.data.datasets[0].data = values;
+      if (this.pressureChart.data.datasets[1]) {
+        this.pressureChart.data.datasets[1].label = '';
+        this.pressureChart.data.datasets[1].data = [];
+      }
+      if (this.pressureChart.data.datasets[2]) {
+        this.pressureChart.data.datasets[2].label = '';
+        this.pressureChart.data.datasets[2].data = [];
+      }
+    }
     this.pressureChart.update();
-    this.currentProfile = currentProfile;
   }
 
   private updateLossChart(): void {
@@ -368,41 +716,152 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.lossChart.update();
   }
 
-  private updateCostChart(iteration: number, cost: number): void {
+  private updateCostChart(iteration?: number, cost?: number): void {
     if (!this.costChart) {
       this.initCharts();
     }
     if (!this.costChart) {
       return;
     }
-    this.iterationLabels.push(iteration.toString());
-    this.costSeries.push(cost);
-    this.costChart.data.labels = this.iterationLabels;
-    this.costChart.data.datasets[0].data = this.costSeries;
+    if (iteration !== undefined && cost !== undefined) {
+      this.iterationLabels.push(iteration.toString());
+      this.costSeries.push(cost);
+    }
+    if (this.stageView === 'facility') {
+      if (this.facilityOptimizationHistory.length) {
+        const history = this.facilityOptimizationHistory;
+        this.costChart.data.labels = history.map((entry) => entry.iteration.toString());
+        this.costChart.data.datasets[0].label = 'Facility cost';
+        this.costChart.data.datasets[0].data = history.map((entry) => entry.cost);
+        if (this.costChart.data.datasets[1]) {
+          this.costChart.data.datasets[1].label = '';
+          this.costChart.data.datasets[1].data = [];
+        }
+      } else {
+        const history = this.facilityTrainingHistory;
+        this.costChart.data.labels = history.map((entry) => entry.epoch);
+        const trainDataset = this.costChart.data.datasets[0];
+        trainDataset.label = 'Facility train loss';
+        trainDataset.data = history.map((entry) => entry.train_loss ?? entry.train_total_loss ?? null);
+        if (!this.costChart.data.datasets[1]) {
+          this.costChart.data.datasets[1] = {
+            label: 'Facility val loss',
+            data: [],
+            borderColor: '#38bdf8',
+            tension: 0.2,
+          };
+        }
+        this.costChart.data.datasets[1].label = 'Facility val loss';
+        this.costChart.data.datasets[1].data = history.map((entry) => entry.val_loss ?? null);
+      }
+    } else {
+      this.costChart.data.labels = this.iterationLabels;
+      this.costChart.data.datasets[0].label = 'Cost';
+      this.costChart.data.datasets[0].data = this.costSeries;
+      if (this.costChart.data.datasets[1]) {
+        this.costChart.data.datasets[1].label = '';
+        this.costChart.data.datasets[1].data = [];
+      }
+    }
     this.costChart.update();
   }
 
-  private updateGradientChart(iteration: number, gradD?: number, gradV?: number): void {
+  private updateGradientChart(iteration?: number, gradD?: number, gradV?: number): void {
     if (!this.gradChart) {
       this.initCharts();
     }
     if (!this.gradChart) {
       return;
     }
-    this.gradLabels.push(iteration.toString());
-    this.gradDSeries.push(gradD ?? null);
-    this.gradVSeries.push(gradV ?? null);
-    this.gradChart.data.labels = this.gradLabels;
-    this.gradChart.data.datasets[0].data = this.gradDSeries;
-    this.gradChart.data.datasets[1].data = this.gradVSeries;
+    if (iteration !== undefined) {
+      this.gradLabels.push(iteration.toString());
+      this.gradDSeries.push(gradD ?? null);
+      this.gradVSeries.push(gradV ?? null);
+    }
+    if (this.stageView === 'facility') {
+      if (this.facilityOptimizationHistory.length) {
+        const history = this.facilityOptimizationHistory;
+        this.gradChart.data.labels = history.map((entry) => entry.iteration.toString());
+        this.gradChart.data.datasets[0].label = '∂J/∂P';
+        this.gradChart.data.datasets[0].data = history.map((entry) => entry.gradients?.dJ_dP ?? null);
+        this.gradChart.data.datasets[1].label = '∂J/∂T';
+        this.gradChart.data.datasets[1].data = history.map((entry) => entry.gradients?.dJ_dT ?? null);
+        if (this.gradChart.data.datasets[2]) {
+          this.gradChart.data.datasets[2].label = '∂J/∂Gas';
+          this.gradChart.data.datasets[2].data = history.map((entry) => entry.gradients?.dJ_dGas ?? null);
+        }
+      } else {
+        const history = this.facilityTrainingHistory;
+        this.gradChart.data.labels = history.map((entry) => entry.epoch);
+        this.gradChart.data.datasets[0].label = 'Train loss';
+        this.gradChart.data.datasets[0].data = history.map((entry) => entry.train_loss ?? entry.train_total_loss ?? null);
+        this.gradChart.data.datasets[1].label = 'Val loss';
+        this.gradChart.data.datasets[1].data = history.map((entry) => entry.val_loss ?? null);
+        if (this.gradChart.data.datasets[2]) {
+          this.gradChart.data.datasets[2].label = '';
+          this.gradChart.data.datasets[2].data = [];
+        }
+      }
+    } else {
+      this.gradChart.data.labels = this.gradLabels;
+      this.gradChart.data.datasets[0].label = '∂J/∂D';
+      this.gradChart.data.datasets[0].data = this.gradDSeries;
+      this.gradChart.data.datasets[1].label = '∂J/∂v';
+      this.gradChart.data.datasets[1].data = this.gradVSeries;
+      if (this.gradChart.data.datasets[2]) {
+        this.gradChart.data.datasets[2].label = '';
+        this.gradChart.data.datasets[2].data = [];
+      }
+    }
     this.gradChart.update();
+  }
+
+  private updateSpatialGradientChart(): void {
+    if (!this.gradProfileChart) {
+      this.initCharts();
+    }
+    if (!this.gradProfileChart) {
+      return;
+    }
+    if (this.stageView === 'facility') {
+      this.gradProfileChart.data.labels = ['Separator Pressure', 'Separator Temp', 'Gas Fraction'];
+      const values = [
+        this.pipelineControls.separatorPressure,
+        this.pipelineControls.separatorTemp,
+        this.pipelineControls.gasFraction,
+      ];
+      this.gradProfileChart.data.datasets[0].label = 'Facility controls';
+      this.gradProfileChart.data.datasets[0].data = values;
+      if (this.gradProfileChart.data.datasets[1]) {
+        this.gradProfileChart.data.datasets[1].label = '';
+        this.gradProfileChart.data.datasets[1].data = [];
+      }
+      if (this.gradProfileChart.data.datasets[2]) {
+        this.gradProfileChart.data.datasets[2].label = '';
+        this.gradProfileChart.data.datasets[2].data = [];
+      }
+    } else {
+      this.gradProfileChart.data.labels = this.xGrid;
+      this.gradProfileChart.data.datasets[0].label = '∂u/∂x target';
+      this.gradProfileChart.data.datasets[0].data = this.targetGradientProfile ?? [];
+      this.gradProfileChart.data.datasets[1].label = '∂u/∂x surrogate';
+      this.gradProfileChart.data.datasets[1].data = this.surrogateGradientPreview ?? [];
+      this.gradProfileChart.data.datasets[2].label = '∂u/∂x optimizer';
+      this.gradProfileChart.data.datasets[2].data = this.optimizerGradientProfile ?? [];
+    }
+    this.gradProfileChart.update();
   }
 
   private handleStreamMessage(message: BackendStreamMessage): void {
     if (message.type === 'iteration') {
       this.running = true;
       this.latestIteration = message.payload;
-      this.updatePressureChart(message.payload.u_profile);
+      this.optimizerProfile = message.payload.u_profile ?? [];
+      if (message.payload.du_dx_profile?.length) {
+        this.optimizerGradientProfile = message.payload.du_dx_profile;
+      }
+      this.updatePressureChart(message.payload.u_profile ?? []);
+      this.updateSpatialGradientChart();
       this.updateCostChart(message.payload.iteration, message.payload.cost);
       this.updateGradientChart(message.payload.iteration, message.payload.grad_D, message.payload.grad_V);
       this.logMessage(
@@ -423,10 +882,35 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.statusLog = [`[${timestamp}] ${message}`, ...this.statusLog].slice(0, 15);
   }
 
+  private computeGradientFromProfile(profile: number[]): number[] {
+    if (!this.xGrid.length || this.xGrid.length !== profile.length) {
+      return [];
+    }
+    const gradients: number[] = [];
+    for (let i = 0; i < profile.length; i += 1) {
+      if (i === 0) {
+        const dx = this.xGrid[1] - this.xGrid[0];
+        gradients.push(dx !== 0 ? (profile[1] - profile[0]) / dx : 0);
+      } else if (i === profile.length - 1) {
+        const dx = this.xGrid[i] - this.xGrid[i - 1];
+        gradients.push(dx !== 0 ? (profile[i] - profile[i - 1]) / dx : 0);
+      } else {
+        const dx = this.xGrid[i + 1] - this.xGrid[i - 1];
+        gradients.push(dx !== 0 ? (profile[i + 1] - profile[i - 1]) / dx : 0);
+      }
+    }
+    return gradients;
+  }
+
   private handleTrainingResponse(response: SimulateResponse): void {
     this.surrogateReady = true;
     this.xGrid = response.x_grid;
     this.targetProfile = response.target_profile;
+    this.targetGradientProfile = this.computeGradientFromProfile(this.targetProfile);
+    this.optimizerProfile = [];
+    this.optimizerGradientProfile = [];
+    this.updatePressureChart();
+    this.updateSpatialGradientChart();
     if (response.training_history?.length) {
       this.trainingHistory = response.training_history;
       this.updateLossChart();
@@ -438,23 +922,45 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     const iterations = response.history ?? [];
     this.costSeries = [];
     this.iterationLabels = [];
+    this.gradLabels = [];
+    this.gradDSeries = [];
+    this.gradVSeries = [];
+    let lastGradientProfile: number[] = [];
+    let lastPressureProfile: number[] = [];
     iterations.forEach((record) => {
       this.iterationLabels.push(record.iteration.toString());
       this.costSeries.push(record.cost);
       this.gradLabels.push(record.iteration.toString());
       this.gradDSeries.push(record.grad_D ?? null);
       this.gradVSeries.push(record.grad_V ?? null);
+      if (record.u_profile?.length) {
+        lastPressureProfile = record.u_profile;
+      }
+      if (record.du_dx_profile?.length) {
+        lastGradientProfile = record.du_dx_profile;
+      }
     });
-    if (this.costChart) {
-      this.costChart.data.labels = this.iterationLabels;
-      this.costChart.data.datasets[0].data = this.costSeries;
-      this.costChart.update();
-    }
-    if (this.gradChart) {
-      this.gradChart.data.labels = this.gradLabels;
-      this.gradChart.data.datasets[0].data = this.gradDSeries;
-      this.gradChart.data.datasets[1].data = this.gradVSeries;
-      this.gradChart.update();
+    if (this.stageView === 'pipe') {
+      if (this.costChart) {
+        this.costChart.data.labels = this.iterationLabels;
+        this.costChart.data.datasets[0].data = this.costSeries;
+        if (this.costChart.data.datasets[1]) {
+          this.costChart.data.datasets[1].data = [];
+        }
+        this.costChart.update();
+      }
+      if (this.gradChart) {
+        this.gradChart.data.labels = this.gradLabels;
+        this.gradChart.data.datasets[0].data = this.gradDSeries;
+        this.gradChart.data.datasets[1].data = this.gradVSeries;
+        if (this.gradChart.data.datasets[2]) {
+          this.gradChart.data.datasets[2].data = [];
+        }
+        this.gradChart.update();
+      }
+    } else {
+      this.updateCostChart();
+      this.updateGradientChart();
     }
 
     if (response.result) {
@@ -463,17 +969,56 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     if (iterations.length) {
       this.latestIteration = iterations[iterations.length - 1];
     }
-    if (iterations.length) {
-      const lastProfile = iterations[iterations.length - 1].u_profile;
-      if (lastProfile?.length) {
-        this.currentProfile = lastProfile;
-        this.updatePressureChart(lastProfile);
-      }
-    }
+    this.optimizerProfile = lastPressureProfile;
+    this.optimizerGradientProfile = lastGradientProfile;
+    this.updatePressureChart();
+    this.updateSpatialGradientChart();
   }
 
   hasGradientSamples(): boolean {
+    if (this.stageView === 'facility') {
+      return this.facilityOptimizationHistory.length > 0 || this.facilityTrainingHistory.length > 0;
+    }
     return this.gradLabels.length > 0;
+  }
+
+  hasSpatialGradientSamples(): boolean {
+    if (this.stageView === 'facility') {
+      return true;
+    }
+    return (
+      (this.targetGradientProfile?.length ?? 0) > 0 ||
+      (this.surrogateGradientPreview?.length ?? 0) > 0 ||
+      (this.optimizerGradientProfile?.length ?? 0) > 0
+    );
+  }
+
+  facilityOptimizationTimestampLabel(): string | null {
+    if (!this.facilityOptimizationTimestamp) {
+      return null;
+    }
+    const parsed = Date.parse(this.facilityOptimizationTimestamp);
+    if (Number.isNaN(parsed)) {
+      return this.facilityOptimizationTimestamp;
+    }
+    return new Date(parsed).toLocaleString();
+  }
+
+  showStatusOverlay(stage: 'pipe' | 'facility', event: MouseEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    const targetRect = target.getBoundingClientRect();
+    const parentRect = this.statusPanel?.nativeElement.getBoundingClientRect();
+    const left = targetRect.left - (parentRect?.left ?? 0);
+    const top = targetRect.bottom - (parentRect?.top ?? 0);
+    this.statusOverlay = {
+      stage,
+      x: left,
+      y: top + 8,
+    };
+  }
+
+  hideStatusOverlay(): void {
+    this.statusOverlay = null;
   }
 
   private applyThemeToCharts(): void {
@@ -545,17 +1090,39 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
       if (ds[1]) {
         ds[1].borderColor = this.darkMode ? '#f97316' : '#faa307';
       }
+      if (ds[2]) {
+        ds[2].borderColor = this.darkMode ? '#38bdf8' : '#0ea5e9';
+      }
       this.gradChart.update('none');
+    };
+
+    const updateSpatialGradientColors = () => {
+      if (!this.gradProfileChart) {
+        return;
+      }
+      const ds = this.gradProfileChart.data.datasets;
+      if (ds[0]) {
+        ds[0].borderColor = this.darkMode ? '#f472b6' : '#ef476f';
+      }
+      if (ds[1]) {
+        ds[1].borderColor = this.darkMode ? '#38bdf8' : '#118ab2';
+      }
+      if (ds[2]) {
+        ds[2].borderColor = this.darkMode ? '#86efac' : '#06d6a0';
+      }
+      this.gradProfileChart.update('none');
     };
 
     applyScales(this.pressureChart);
     applyScales(this.costChart);
     applyScales(this.lossChart);
     applyScales(this.gradChart);
+    applyScales(this.gradProfileChart);
     updatePressureColors();
     updateCostColors();
     updateLossColors();
     updateGradColors();
+    updateSpatialGradientColors();
   }
 
   private updateBodyTheme(): void {

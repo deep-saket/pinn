@@ -6,78 +6,227 @@
   </div>
 
   <div class="dashboard-layout">
-    <section class="panel optimization-panel">
-      <app-result-panel
-        [running]="running"
-        [currentIteration]="latestIteration"
-        [finalResult]="finalResult ?? undefined"
-      ></app-result-panel>
+    <section class="panel status-panel" #statusPanel>
+      <div class="status-header">
+        <h2>Components</h2>
+        <div class="status-chip" [class.running]="running">{{ running ? 'Running' : 'Idle' }}</div>
+      </div>
+      <div class="status-radios">
+        <label
+          class="stage-pill"
+          (mouseenter)="showStatusOverlay('pipe', $event)"
+          (mouseleave)="hideStatusOverlay()">
+          <input type="radio" name="status-stage" [checked]="stageView === 'pipe'" (change)="setStage('pipe')" />
+          Pipe
+        </label>
+        <label
+          class="stage-pill"
+          (mouseenter)="showStatusOverlay('facility', $event)"
+          (mouseleave)="hideStatusOverlay()">
+          <input type="radio" name="status-stage" [checked]="stageView === 'facility'" (change)="setStage('facility')" />
+          Facility
+        </label>
+      </div>
+      <div class="status-overlay" *ngIf="statusOverlay?.stage === 'pipe'"
+           [style.top.px]="statusOverlay?.y"
+           [style.left.px]="statusOverlay?.x">
+        <p><strong>Iteration:</strong> {{ latestIteration?.iteration ?? '—' }}</p>
+        <p><strong>D:</strong> {{ (latestIteration?.D ?? finalResult?.best_params?.D ?? pipePreviewParams.D) | number: '1.3-3' }}</p>
+        <p><strong>v:</strong> {{ (latestIteration?.v ?? finalResult?.best_params?.v ?? pipePreviewParams.v) | number: '1.2-2' }}</p>
+        <p><strong>Cost:</strong> {{ (latestIteration?.cost ?? finalResult?.best_cost) | number: '1.2-2' }}</p>
+      </div>
+      <div class="status-overlay" *ngIf="statusOverlay?.stage === 'facility'"
+           [style.top.px]="statusOverlay?.y"
+           [style.left.px]="statusOverlay?.x">
+        <p><strong>Separator P:</strong> {{ pipelineControls.separatorPressure | number: '1.0-0' }} bar</p>
+        <p><strong>Separator T:</strong> {{ pipelineControls.separatorTemp | number: '1.0-0' }} °C</p>
+        <p><strong>Gas fraction:</strong> {{ pipelineControls.gasFraction | number: '1.2-2' }}</p>
+      </div>
     </section>
 
     <section class="panel controls">
-      <h2>Surrogate Controls</h2>
-      <div class="control-row">
-        <label for="num-systems">Synthetic systems</label>
-        <input id="num-systems" type="number" min="1" [(ngModel)]="controls.numSystems" />
+      <div class="controls-header">
+        <h2>Knobs</h2>
       </div>
-      <div class="control-row sliders">
-        <label>D (diffusion)</label>
-        <input type="range" min="0.01" max="0.2" step="0.005" [(ngModel)]="controls.initialD" />
-        <span>{{ controls.initialD | number: '1.3-3' }}</span>
+      <div *ngIf="stageView === 'pipe'; else facilityKnobs" class="control-block">
+        <div class="control-row sliders">
+          <label>Target outlet pressure (bar)</label>
+          <input type="range" min="80" max="260" step="1" [(ngModel)]="pipeTargets.outletPressure" />
+          <span>{{ pipeTargets.outletPressure | number: '1.0-0' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Target mean pressure (bar)</label>
+          <input type="range" min="60" max="220" step="1" [(ngModel)]="pipeTargets.meanPressure" />
+          <span>{{ pipeTargets.meanPressure | number: '1.0-0' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Target outlet gradient</label>
+          <input type="range" min="-1" max="1" step="0.01" [(ngModel)]="pipeTargets.outletGradient" />
+          <span>{{ pipeTargets.outletGradient | number: '1.2-2' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Iterations</label>
+          <input type="range" min="5" max="80" step="1" [(ngModel)]="optimizationControls.maxIters" />
+          <span>{{ optimizationControls.maxIters }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Population</label>
+          <input type="range" min="4" max="40" step="1" [(ngModel)]="optimizationControls.population" />
+          <span>{{ optimizationControls.population }}</span>
+        </div>
       </div>
-      <div class="control-row sliders">
-        <label>v (velocity)</label>
-        <input type="range" min="0.05" max="1.5" step="0.01" [(ngModel)]="controls.initialV" />
-        <span>{{ controls.initialV | number: '1.2-2' }}</span>
-      </div>
-      <div class="control-row">
-        <label for="max-iters">Iterations</label>
-        <input id="max-iters" type="number" min="5" [(ngModel)]="controls.maxIters" />
-      </div>
-      <div class="control-row">
-        <label for="population">Population</label>
-        <input id="population" type="number" min="4" [(ngModel)]="controls.population" />
-      </div>
+      <ng-template #facilityKnobs>
+        <div class="control-block objective-block">
+          <h3>Facility objectives</h3>
+          <div class="control-row sliders">
+            <label>Target vapor fraction</label>
+            <input type="range" min="0.05" max="0.95" step="0.01" [(ngModel)]="facilityObjectives.vaporFraction" />
+            <span>{{ facilityObjectives.vaporFraction | number: '1.2-2' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Target gas flow (kg/s)</label>
+          <input type="range" min="0" max="40" step="0.5" [(ngModel)]="facilityObjectives.gasFlow" />
+          <span>{{ facilityObjectives.gasFlow | number: '1.1-1' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Target liquid flow (kg/s)</label>
+          <input type="range" min="0" max="40" step="0.5" [(ngModel)]="facilityObjectives.liquidFlow" />
+          <span>{{ facilityObjectives.liquidFlow | number: '1.1-1' }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Optimizer iterations</label>
+          <input type="range" min="5" max="60" step="1" [(ngModel)]="facilityOptimizationControls.maxIters" />
+          <span>{{ facilityOptimizationControls.maxIters }}</span>
+        </div>
+        <div class="control-row sliders">
+          <label>Population</label>
+          <input type="range" min="4" max="40" step="1" [(ngModel)]="facilityOptimizationControls.population" />
+          <span>{{ facilityOptimizationControls.population }}</span>
+        </div>
+        </div>
+      </ng-template>
     </section>
 
-    <section class="panel actions">
-      <h2>Actions</h2>
-      <div class="button-column">
-        <button (click)="simulateAndTrain()">Simulate & Train</button>
-        <button (click)="refreshSurrogateStatus()">Refresh Status</button>
-        <button (click)="loadOptimizationHistory()">Load Last Run</button>
-        <button (click)="startOptimization()" [disabled]="running">Start Optimization</button>
-        <button (click)="stopOptimization()" [disabled]="!running">Stop</button>
+    <section class="panel workflow-panel">
+      <h2>Workflow</h2>
+      <div class="toggle-row"><label>Stage:</label> <strong>{{ stageView | titlecase }}</strong></div>
+      <div class="control-row">
+        <label>Iterations</label>
+        <input type="number" min="5" [(ngModel)]="optimizationControls.maxIters" />
       </div>
-      <div class="error" *ngIf="errorMessage">
-        {{ errorMessage }}
+      <div class="control-row">
+        <label>Population</label>
+        <input type="number" min="4" [(ngModel)]="optimizationControls.population" />
+      </div>
+      <div class="pipeline-metrics" *ngIf="stageView === 'facility' && pipelinePreview?.facility as facility">
+        <p><strong>Vapor fraction:</strong> {{ facility.vapor_fraction | number: '1.2-2' }}</p>
+        <p><strong>Gas flow:</strong> {{ facility.gas_flow_rate | number: '1.2-2' }} kg/s</p>
+        <p><strong>Liquid flow:</strong> {{ facility.liquid_flow_rate | number: '1.2-2' }} kg/s</p>
+      </div>
+      <div class="facility-status" *ngIf="facilityStatus">
+        <p><strong>Facility dataset:</strong> {{ facilityStatus.dataset_size || '—' }}</p>
+        <p><strong>Facility model:</strong> {{ facilityStatus.has_model ? 'Ready' : 'Missing' }}</p>
+        <p><strong>Last trained:</strong> {{ facilityStatus.last_trained_at || '—' }}</p>
+      </div>
+      <div class="system-actions">
+        <button (click)="loadOptimizationHistory()">Load Last Run</button>
+        <button (click)="refreshSurrogateStatus()">Refresh Status</button>
+      </div>
+      <div class="error" *ngIf="errorMessage">{{ errorMessage }}</div>
+      <div class="error" *ngIf="facilityError">{{ facilityError }}</div>
+      <div class="error" *ngIf="facilityOptError">{{ facilityOptError }}</div>
+    </section>
+
+    <section class="panel actions-panel">
+      <h2>Optimization Actions</h2>
+      <div class="action-groups">
+        <div class="action-group" *ngIf="stageView === 'pipe'">
+          <h3>Pipe Optimization</h3>
+          <button (click)="startOptimization()" [disabled]="running">Start Optimization</button>
+          <button (click)="stopOptimization()" [disabled]="!running">Stop Optimization</button>
+        </div>
+        <div class="action-group" *ngIf="stageView === 'facility'">
+          <h3>Facility Optimization</h3>
+          <button (click)="optimizeFacility()" [disabled]="facilityOptimizerBusy || !facilityStatus?.has_model">
+            {{ facilityOptimizerBusy ? 'Optimizing…' : 'Optimize Facility' }}
+          </button>
+        </div>
       </div>
     </section>
 
     <section class="panel chart pressure-chart">
-      <h2>Pressure Profile</h2>
+      <h2>{{ stageView === 'pipe' ? 'Pressure Profile' : 'Facility Outputs' }}</h2>
       <div class="chart-canvas">
         <canvas #pressureCanvas></canvas>
       </div>
-      <small class="axis-legend">
+      <small class="axis-legend" *ngIf="stageView === 'pipe'">
         Horizontal axis: pipe location x &nbsp;|&nbsp; Vertical axis: pressure u(x)
       </small>
-      <small class="chart-note" *ngIf="surrogateStatus?.sample_prediction as preview">
+      <small class="chart-note" *ngIf="stageView === 'pipe' && surrogateStatus?.sample_prediction as preview">
         Preview at t={{ preview.t | number: '1.2-2' }},
-        D={{ preview.D | number: '1.3-3' }},
-        v={{ preview.v | number: '1.3-3' }}
+        D={{ pipePreviewParams.D | number: '1.3-3' }},
+        v={{ pipePreviewParams.v | number: '1.3-3' }}
+      </small>
+      <small class="axis-legend" *ngIf="stageView === 'facility'">
+        Bars show latest facility surrogate outputs (vapor, gas, liquid).
       </small>
     </section>
 
     <section class="panel surrogate-panel">
-      <div class="status bold" [class.ready]="surrogateReady">
-        Surrogate Status — {{ surrogateReady ? 'Ready' : 'Awaiting training' }}
-      </div>
-      <div class="status-details" *ngIf="surrogateStatus">
-        <p><strong>Dataset size:</strong> {{ surrogateStatus.dataset_size || '—' }}</p>
-        <p><strong>Last trained:</strong> {{ surrogateStatus.last_trained_at || '—' }}</p>
-        <p><strong>Model path:</strong> {{ surrogateStatus.model_path || '—' }}</p>
-      </div>
+      <ng-container *ngIf="stageView === 'pipe'; else facilitySurrogateBlock">
+        <div class="status bold" [class.ready]="surrogateStatus?.has_model">
+          Pipe Surrogate — {{ surrogateStatus?.has_model ? 'Ready' : 'Awaiting training' }}
+        </div>
+        <div class="status-details" *ngIf="surrogateStatus; else missingPipeStatus">
+          <p><strong>Dataset size:</strong> {{ surrogateStatus.dataset_size || '—' }}</p>
+          <p><strong>Last trained:</strong> {{ surrogateStatus.last_trained_at || '—' }}</p>
+          <p><strong>Model path:</strong> {{ surrogateStatus.model_path || '—' }}</p>
+        </div>
+        <ng-template #missingPipeStatus>
+          <p class="status-details">Run “Simulate Pipe” to populate the surrogate.</p>
+        </ng-template>
+        <div class="surrogate-slider">
+          <label>Simulation count</label>
+          <input type="range" min="4" max="40" step="1" [(ngModel)]="surrogateSimControls.numSystems" />
+          <span>{{ surrogateSimControls.numSystems }}</span>
+        </div>
+        <div class="surrogate-actions">
+          <button (click)="simulateAndTrain()">Simulate & Train Pipe</button>
+          <button (click)="refreshSurrogateStatus()">Refresh Pipe Status</button>
+        </div>
+      </ng-container>
+      <ng-template #facilitySurrogateBlock>
+        <div class="status bold" [class.ready]="facilityStatus?.has_model">
+          Facility Surrogate — {{ facilityStatus?.has_model ? 'Ready' : 'Awaiting training' }}
+        </div>
+        <div class="status-details" *ngIf="facilityStatus; else missingFacilityStatus">
+          <p><strong>Dataset size:</strong> {{ facilityStatus.dataset_size || '—' }}</p>
+          <p><strong>Last trained:</strong> {{ facilityStatus.last_trained_at || '—' }}</p>
+          <p><strong>Model path:</strong> {{ facilityStatus.model_path || '—' }}</p>
+        </div>
+        <div class="status-details facility-opt-summary" *ngIf="facilityOptimizationResult as opt">
+          <p><strong>Best pressure:</strong> {{ opt.best_controls.separator_pressure | number: '1.0-0' }} bar</p>
+          <p><strong>Best temp:</strong> {{ opt.best_controls.separator_temp | number: '1.0-0' }} °C</p>
+          <p><strong>Gas fraction:</strong> {{ opt.best_controls.gas_fraction | number: '1.2-2' }}</p>
+          <p><strong>Cost:</strong> {{ opt.best_cost | number: '1.3-3' }}</p>
+          <p><strong>Vapor fraction:</strong> {{ opt.best_metrics?.vapor_fraction | number: '1.2-2' }}</p>
+          <p *ngIf="facilityPipeContext">
+            <strong>Pipe outlet:</strong>
+            {{ facilityPipeContext.outlet_pressure | number: '1.0-0' }} bar
+          </p>
+          <p *ngIf="facilityOptimizationTimestampLabel() as ts"><strong>Updated:</strong> {{ ts }}</p>
+        </div>
+        <ng-template #missingFacilityStatus>
+          <p class="status-details">
+            Simulate and train the facility surrogate to populate its metrics.
+          </p>
+        </ng-template>
+        <div class="surrogate-actions">
+          <button (click)="simulateFacilityDataset()">Simulate Facility Dataset</button>
+          <button (click)="trainFacilitySurrogate()">Train Facility Surrogate</button>
+          <button (click)="runPipeline()">Run Pipe ➜ Facility</button>
+        </div>
+      </ng-template>
     </section>
 
     <section class="panel chart cost-chart">
@@ -114,6 +263,16 @@
       </div>
       <p class="hint" *ngIf="!hasGradientSamples()">
         Gradients appear once optimization streams iterations.
+      </p>
+    </section>
+
+    <section class="panel chart spatial-grad-chart">
+      <h2>Spatial Gradient (∂u/∂x)</h2>
+      <div class="chart-canvas">
+        <canvas #spatialGradientCanvas></canvas>
+      </div>
+      <p class="hint" *ngIf="!hasSpatialGradientSamples()">
+        Run surrogate training or optimization to populate the ∂u/∂x curve.
       </p>
     </section>
   </div>

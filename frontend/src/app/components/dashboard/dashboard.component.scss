@@ -10,28 +10,10 @@
 }
 
 .theme-toggle {
-  padding: 0.4rem 0.9rem;
-  border-radius: 999px;
-  border: 1px solid #1b9aaa;
-  background: transparent;
-  color: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.dashboard-page {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.toolbar {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.theme-toggle {
-  padding: 0.35rem 0.9rem;
+  position: absolute;
+  top: 1rem;
+  right: 1.5rem;
+  padding: 0.35rem 0.8rem;
   border-radius: 999px;
   border: 1px solid #1b9aaa;
   background: transparent;
@@ -42,13 +24,14 @@
 
 .dashboard-layout {
   display: grid;
-  grid-template-columns: 320px 200px minmax(0, 1fr);
+  grid-template-columns: 340px 240px minmax(0, 1fr);
   grid-template-areas:
-    'optimization optimization optimization'
+    'status status status'
     'controls actions pressure'
     'surrogate surrogate cost'
     'logs logs loss'
-    'logs logs grad';
+    'logs logs grad'
+    'logs logs spatial';
   gap: 1.5rem;
   padding: 1.5rem;
 }
@@ -71,10 +54,6 @@
   grid-area: controls;
 }
 
-.panel.actions {
-  grid-area: actions;
-}
-
 .pressure-chart {
   grid-area: pressure;
 }
@@ -86,18 +65,16 @@
 .optimization-panel {
   grid-area: optimization;
 }
+.panel.controls {
+  grid-area: controls;
+}
 
-.theme-toggle {
-  position: absolute;
-  top: 1rem;
-  right: 1.5rem;
-  padding: 0.35rem 0.75rem;
-  border-radius: 999px;
-  border: 1px solid #1b9aaa;
-  background: transparent;
-  color: inherit;
-  font-weight: 600;
-  cursor: pointer;
+.panel.actions {
+  grid-area: actions;
+}
+
+.status-panel {
+  grid-area: status;
 }
 
 .cost-chart {
@@ -110,6 +87,11 @@
 
 .grad-chart {
   grid-area: grad;
+  min-width: 0;
+}
+
+.spatial-grad-chart {
+  grid-area: spatial;
   min-width: 0;
 }
 
@@ -137,32 +119,133 @@
   width: 100%;
 }
 
-.panel.actions .button-column {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+.control-block {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.02);
 }
 
-.panel.actions button {
+.control-block h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: #1f2937;
+}
+
+.objective-block .control-row {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.objective-block input[type='number'] {
   width: 100%;
-  padding: 0.45rem;
-  border-radius: 6px;
+}
+
+.pipeline-metrics {
+  margin-top: 0.5rem;
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  font-size: 0.9rem;
+  color: #1f2937;
+}
+
+.facility-status {
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.facility-opt-summary {
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+}
+
+.surrogate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.surrogate-actions button {
+  flex: 1 1 160px;
+  padding: 0.4rem;
   border: none;
+  border-radius: 8px;
   background: #1b9aaa;
   color: #fff;
   font-weight: 600;
   cursor: pointer;
 }
 
-.panel.actions button:disabled {
-  background: #b3c1c9;
+.surrogate-actions button:disabled {
+  background: #94a3b8;
   cursor: not-allowed;
 }
 
-.panel.actions .error {
+.surrogate-slider {
+  margin: 0.75rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.surrogate-slider input {
+  width: 100%;
+}
+
+.surrogate-slider span {
+  font-weight: 600;
+  color: inherit;
+}
+
+.system-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.system-actions button {
+  flex: 1;
+  padding: 0.4rem;
+  border: none;
+  border-radius: 8px;
+  background: #334155;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.system-actions button:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.status-radios {
+  display: flex;
+  gap: 0.75rem;
   margin-top: 0.5rem;
-  color: #e63946;
+}
+
+.stage-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
   font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.status-overlay {
+  position: absolute;
+  background: #f1f5f9;
+  color: #0f172a;
+  border-radius: 8px;
+  padding: 0.65rem;
+  font-size: 0.85rem;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.12);
+  min-width: 190px;
 }
 
 .surrogate-panel .status {
@@ -254,6 +337,47 @@
   grid-area: logs;
 }
 
+.actions-panel {
+  grid-area: actions;
+}
+
+.action-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem 1rem;
+}
+
+.action-group {
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.action-group h3 {
+  margin: 0 0 0.35rem 0;
+  font-size: 0.95rem;
+  color: #0f172a;
+}
+
+.action-group button {
+  padding: 0.45rem;
+  border: none;
+  border-radius: 8px;
+  background: #1b9aaa;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.action-group button:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
 @media (max-width: 900px) {
   .dashboard-layout {
     grid-template-columns: 1fr;
@@ -262,52 +386,44 @@
       'actions'
       'pressure'
       'surrogate'
-      'optimization'
-      'logs'
       'cost'
       'loss'
-      'grad';
+      'grad'
+      'spatial'
+      'logs';
   }
 }
-
-
-
-body.dark-theme .panel {
-  background: #141c2e;
-  color: #e2e8f0;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+.controls-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
 }
 
-body.dark-theme .panel.actions button {
-  background: #2563eb;
-  color: #f8fafc;
-  border: 1px solid #1d4ed8;
+.controls-header h2 {
+  flex: 1;
 }
 
-body.dark-theme .panel.actions button:disabled {
-  background: #334155;
+.stage-toggle {
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
-body.dark-theme .surrogate-panel .status {
-  color: #fbbf24;
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
 }
 
-body.dark-theme .surrogate-panel .status-details {
-  color: #cbd5f5;
+.controls-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
-
-body.dark-theme .theme-toggle {
-  border-color: #94a3b8;
-  color: #e2e8f0;
-}
-
-body.dark-theme .chart .chart-canvas {
-  background: #0b1220;
-  border-radius: 10px;
-  border: 1px solid #1f2a3f;
-}
-
-body.dark-theme .logs .log-list {
-  background: #0f172a;
-  color: #e2e8f0;
+.status-panel {
+  grid-area: status;
+  position: relative;
 }

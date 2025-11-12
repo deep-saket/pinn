@@ -15,7 +15,7 @@ import torch
 import pandas as pd
 import numpy as np
 
-from optimizer import GaussianOptimizer, OptimizationConfig
+from optimizer import GaussianOptimizer, OptimizationConfig, PipeTargetObjectives
 from simulator import SimulationConfig, generate_training_data, run_simulation
 from surrogate_model import (
     SurrogatePINN,
@@ -23,6 +23,19 @@ from surrogate_model import (
     evaluate_profile,
     train_surrogate,
 )
+from facility_surrogate import (
+    FacilitySurrogate,
+    FacilityTrainingConfig,
+    evaluate_facility,
+    generate_facility_dataset,
+    train_facility_surrogate,
+)
+from facility_optimizer import (
+    FacilityGaussianOptimizer,
+    FacilityOptimizationConfig,
+    FacilityOptimizationTargets,
+)
+from pipeline import FacilityControls, PipeControls, run_pipeline
 
 
 logger = logging.getLogger("geminus.backend")
@@ -31,12 +44,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_JSON = DATA_DIR / "surrogate_latest.json"
 DATA_XLSX = DATA_DIR / "surrogate_latest.xlsx"
+FACILITY_DATA_JSON = DATA_DIR / "facility_latest.json"
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 MODEL_PATH = ARTIFACT_DIR / "surrogate_latest.pt"
 TRAINING_LOG_PATH = ARTIFACT_DIR / "surrogate_training_history.json"
+FACILITY_MODEL_PATH = ARTIFACT_DIR / "facility_surrogate.pt"
+FACILITY_TRAINING_LOG_PATH = ARTIFACT_DIR / "facility_training_history.json"
 EXPORT_DIR = Path(__file__).resolve().parent / "exports"
 OPT_JSON = EXPORT_DIR / "optimization_latest.json"
 OPT_XLSX = EXPORT_DIR / "optimization_latest.xlsx"
+FACILITY_OPT_JSON = EXPORT_DIR / "facility_optimization_latest.json"
+FACILITY_OPT_XLSX = EXPORT_DIR / "facility_optimization_latest.xlsx"
 TARGET_DIFFUSION = 0.12
 TARGET_VELOCITY = 0.65
 
@@ -64,10 +82,32 @@ def _persist_model(model: SurrogatePINN) -> None:
     logger.info("Surrogate weights saved to %s", MODEL_PATH)
 
 
+def _persist_facility_dataset(dataset: Dict[str, np.ndarray]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "inputs": dataset["inputs"].tolist(),
+        "targets": dataset["targets"].tolist(),
+    }
+    FACILITY_DATA_JSON.write_text(json.dumps(payload))
+    logger.info("Facility dataset saved to %s", FACILITY_DATA_JSON)
+
+
+def _persist_facility_model(model: FacilitySurrogate) -> None:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), FACILITY_MODEL_PATH)
+    logger.info("Facility surrogate weights saved to %s", FACILITY_MODEL_PATH)
+
+
 def _persist_training_history(history: List[Dict[str, float]]) -> None:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     TRAINING_LOG_PATH.write_text(json.dumps(history, indent=2))
     logger.info("Training history saved to %s (%d epochs)", TRAINING_LOG_PATH, len(history))
+
+
+def _persist_facility_history(history: List[Dict[str, float]]) -> None:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    FACILITY_TRAINING_LOG_PATH.write_text(json.dumps(history, indent=2))
+    logger.info("Facility training history saved to %s", FACILITY_TRAINING_LOG_PATH)
 
 
 def _persist_optimization_history(history: List[Dict[str, Any]], result: Dict[str, Any]) -> None:
@@ -83,10 +123,90 @@ def _persist_optimization_history(history: List[Dict[str, Any]], result: Dict[st
                 "grad_D": rec.get("grad_D"),
                 "grad_V": rec.get("grad_V"),
                 "grad_norm": rec.get("grad_norm"),
+                "outlet_pressure": rec.get("outlet_pressure"),
+                "mean_pressure": rec.get("mean_pressure"),
+                "outlet_gradient": rec.get("outlet_gradient"),
                 "u_profile": json.dumps(rec["u_profile"]),
+                "du_dx_profile": json.dumps(rec.get("du_dx_profile")),
             }
             for rec in history
         ]
+    )
+    summary = pd.DataFrame(
+        [
+            {
+                "best_D": result["best_params"]["D"],
+                "best_v": result["best_params"]["v"],
+                "best_cost": result["best_cost"],
+                "best_outlet_pressure": (result.get("best_metrics") or {}).get("outlet_pressure"),
+                "best_mean_pressure": (result.get("best_metrics") or {}).get("mean_pressure"),
+                "best_outlet_gradient": (result.get("best_metrics") or {}).get("outlet_gradient"),
+            }
+        ]
+    )
+    with pd.ExcelWriter(OPT_XLSX) as writer:
+        df.to_excel(writer, sheet_name="iterations", index=False)
+        summary.to_excel(writer, sheet_name="summary", index=False)
+    logger.info(
+        "Optimization history saved to %s and %s (%d iterations)",
+        OPT_JSON,
+        OPT_XLSX,
+        len(history),
+    )
+
+
+def _persist_facility_optimization(
+    history: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    pipe_context: Dict[str, float],
+    timestamp: str,
+) -> None:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": timestamp,
+        "pipe_context": pipe_context,
+        "history": history,
+        "result": result,
+    }
+    FACILITY_OPT_JSON.write_text(json.dumps(payload, indent=2))
+    history_rows = []
+    for rec in history:
+        row = {
+            "iteration": rec["iteration"],
+            "separator_pressure": rec["separator_pressure"],
+            "separator_temp": rec["separator_temp"],
+            "gas_fraction": rec["gas_fraction"],
+            "cost": rec["cost"],
+            "vapor_fraction": rec["metrics"].get("vapor_fraction"),
+            "gas_flow_rate": rec["metrics"].get("gas_flow_rate"),
+            "liquid_flow_rate": rec["metrics"].get("liquid_flow_rate"),
+            "dJ_dP": rec["gradients"].get("dJ_dP"),
+            "dJ_dT": rec["gradients"].get("dJ_dT"),
+            "dJ_dGas": rec["gradients"].get("dJ_dGas"),
+        }
+        history_rows.append(row)
+    df = pd.DataFrame(history_rows)
+    summary = pd.DataFrame(
+        [
+            {
+                "best_pressure": result["best_controls"]["separator_pressure"],
+                "best_temp": result["best_controls"]["separator_temp"],
+                "best_gas_fraction": result["best_controls"]["gas_fraction"],
+                "best_cost": result["best_cost"],
+                "best_vapor_fraction": result["best_metrics"].get("vapor_fraction"),
+                "best_gas_flow_rate": result["best_metrics"].get("gas_flow_rate"),
+                "best_liquid_flow_rate": result["best_metrics"].get("liquid_flow_rate"),
+            }
+        ]
+    )
+    with pd.ExcelWriter(FACILITY_OPT_XLSX) as writer:
+        df.to_excel(writer, sheet_name="iterations", index=False)
+        summary.to_excel(writer, sheet_name="summary", index=False)
+    logger.info(
+        "Facility optimization history saved to %s and %s (%d iterations)",
+        FACILITY_OPT_JSON,
+        FACILITY_OPT_XLSX,
+        len(history),
     )
 
 
@@ -107,6 +227,31 @@ def _apply_reference_state(reference: Dict[str, Any]) -> None:
     state["target_params"] = reference["target_params"]
 
 
+def _compute_pipe_context(diffusion: float, velocity: float, time: float) -> Dict[str, float]:
+    _ensure_ready()
+    if state.get("x_grid") is None:
+        reference = _build_reference_state(state["simulation_config"])
+        _apply_reference_state(reference)
+    x_grid = np.array(state["x_grid"], dtype=np.float32)
+    pipe_model = _get_surrogate_or_load()
+    profile = evaluate_profile(
+        pipe_model,
+        x=x_grid.astype(np.float32),
+        t=time,
+        D=diffusion,
+        v=velocity,
+        device="cpu",
+    )
+    outlet_pressure = float(profile[-1])
+    temperature = 30.0 + 0.8 * velocity * 40.0
+    throughput = max(5.0, 10.0 * diffusion + 2.0 * velocity)
+    return {
+        "outlet_pressure": outlet_pressure,
+        "temperature": temperature,
+        "throughput": throughput,
+    }
+
+
 def _ensure_surrogate_ready() -> bool:
     try:
         _get_surrogate_or_load()
@@ -122,24 +267,14 @@ def _ensure_surrogate_ready() -> bool:
         reference = _build_reference_state(state["simulation_config"])
         _apply_reference_state(reference)
     return True
-    summary = pd.DataFrame(
-        [
-            {
-                "best_D": result["best_params"]["D"],
-                "best_v": result["best_params"]["v"],
-                "best_cost": result["best_cost"],
-            }
-        ]
-    )
-    with pd.ExcelWriter(OPT_XLSX) as writer:
-        df.to_excel(writer, sheet_name="iterations", index=False)
-        summary.to_excel(writer, sheet_name="summary", index=False)
-    logger.info(
-        "Optimization history saved to %s and %s (%d iterations)",
-        OPT_JSON,
-        OPT_XLSX,
-        len(history),
-    )
+
+
+def _ensure_facility_ready() -> bool:
+    try:
+        _get_facility_surrogate_or_load()
+    except HTTPException:
+        return False
+    return True
 
 
 def _load_persisted_dataset() -> Dict[str, np.ndarray]:
@@ -147,6 +282,18 @@ def _load_persisted_dataset() -> Dict[str, np.ndarray]:
         raise HTTPException(status_code=404, detail="No persisted dataset found. Run /simulate or provide dataset payload.")
     payload = json.loads(DATA_JSON.read_text())
     return _dataset_from_payload(payload)
+
+
+def _load_facility_dataset() -> Dict[str, np.ndarray]:
+    if not FACILITY_DATA_JSON.exists():
+        raise HTTPException(status_code=404, detail="No facility dataset available. Run /facility/simulate first.")
+    payload = json.loads(FACILITY_DATA_JSON.read_text())
+    try:
+        inputs = np.array(payload["inputs"], dtype=np.float32)
+        targets = np.array(payload["targets"], dtype=np.float32)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Facility dataset missing key: {exc}") from exc
+    return {"inputs": inputs, "targets": targets}
 
 
 def _dataset_from_payload(payload: Dict[str, Any]) -> Dict[str, np.ndarray]:
@@ -231,6 +378,26 @@ def _train_surrogate_with_dataset(
     }
 
 
+def _train_facility_with_dataset(
+    dataset: Dict[str, np.ndarray],
+    cfg: FacilityTrainingConfig,
+) -> Dict[str, Any]:
+    model, history = train_facility_surrogate(dataset, cfg)
+    _persist_facility_model(model)
+    _persist_facility_history(history)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    state["facility_dataset"] = dataset
+    state["facility_surrogate"] = model
+    state["facility_training_history"] = history
+    state["facility_last_trained_at"] = timestamp
+    logger.info("Facility surrogate trained on %s samples", len(dataset["inputs"]))
+    return {
+        "dataset_size": len(dataset["inputs"]),
+        "training_history": history,
+        "last_trained_at": timestamp,
+    }
+
+
 def _get_surrogate_or_load() -> SurrogatePINN:
     surrogate = state.get("surrogate")
     if surrogate is not None:
@@ -242,6 +409,20 @@ def _get_surrogate_or_load() -> SurrogatePINN:
     model.eval()
     state["surrogate"] = model
     logger.info("Loaded surrogate weights from %s", MODEL_PATH)
+    return model
+
+
+def _get_facility_surrogate_or_load() -> FacilitySurrogate:
+    facility = state.get("facility_surrogate")
+    if facility is not None:
+        return facility
+    if not FACILITY_MODEL_PATH.exists():
+        raise HTTPException(status_code=404, detail="No facility surrogate available. Train it first.")
+    model = FacilitySurrogate()
+    model.load_state_dict(torch.load(FACILITY_MODEL_PATH, map_location="cpu"))
+    model.eval()
+    state["facility_surrogate"] = model
+    logger.info("Loaded facility surrogate weights from %s", FACILITY_MODEL_PATH)
     return model
 
 
@@ -277,6 +458,9 @@ class OptimizeRequest(BaseModel):
     population: int = 24
     initial_D: Optional[float] = None
     initial_V: Optional[float] = None
+    target_outlet_pressure: Optional[float] = None
+    target_mean_pressure: Optional[float] = None
+    target_gradient: Optional[float] = None
 
 
 class TrainSurrogateRequest(BaseModel):
@@ -305,6 +489,59 @@ class SurrogateStatusResponse(BaseModel):
     sample_prediction: Optional[Dict[str, Any]]
 
 
+class FacilitySimulateRequest(BaseModel):
+    num_samples: int = 2000
+    seed: Optional[int] = None
+
+
+class FacilityTrainRequest(BaseModel):
+    epochs: int = 150
+    batch_size: int = 256
+    learning_rate: float = 1e-3
+    val_split: float = 0.2
+
+
+class FacilityStatusResponse(BaseModel):
+    has_model: bool
+    model_path: Optional[str]
+    dataset_size: Optional[int]
+    last_trained_at: Optional[str]
+    training_history: Optional[List[Dict[str, Any]]]
+
+
+class PipelineRunRequest(BaseModel):
+    D: float = 0.12
+    v: float = 0.65
+    t: float = 0.6
+    separator_pressure: float = 100.0
+    separator_temp: float = 45.0
+    gas_fraction: float = 0.5
+
+
+class FacilityOptimizeRequest(BaseModel):
+    max_iters: int = 20
+    population: int = 20
+    initial_separator_pressure: Optional[float] = None
+    initial_separator_temp: Optional[float] = None
+    initial_gas_fraction: Optional[float] = None
+    target_vapor_fraction: Optional[float] = 0.65
+    target_gas_flow_rate: Optional[float] = None
+    target_liquid_flow_rate: Optional[float] = None
+    weight_vapor: float = 1.0
+    weight_gas: float = 0.3
+    weight_liquid: float = 0.2
+    pipe_D: Optional[float] = None
+    pipe_v: Optional[float] = None
+    pipe_t: Optional[float] = None
+
+
+class FacilityOptimizeStatusResponse(BaseModel):
+    history: List[Dict[str, Any]]
+    result: Optional[Dict[str, Any]]
+    pipe_context: Optional[Dict[str, float]]
+    timestamp: Optional[str]
+
+
 app = FastAPI(title="Dummy Geminus Optimization API")
 app.add_middleware(
     CORSMiddleware,
@@ -320,6 +557,8 @@ state: Dict[str, Any] = {
     "simulation_config": SimulationConfig(),
     "training_data": None,
     "surrogate": None,
+    "facility_dataset": None,
+    "facility_surrogate": None,
     "target_profile": None,
     "target_time": None,
     "x_grid": None,
@@ -332,6 +571,14 @@ state: Dict[str, Any] = {
     "training_history": None,
     "dataset_size": None,
     "last_trained_at": None,
+    "facility_training_history": None,
+    "facility_last_trained_at": None,
+    "pipeline_snapshot": None,
+    "pipe_targets": None,
+    "facility_opt_history": [],
+    "facility_opt_result": None,
+    "facility_opt_pipe_context": None,
+    "facility_opt_timestamp": None,
 }
 
 
@@ -357,6 +604,186 @@ async def simulate_and_train(request: SimulateRequest) -> Dict[str, Any]:
         "message": "surrogate trained",
         **response,
     }
+
+
+@app.post("/facility/simulate")
+async def facility_simulate(request: FacilitySimulateRequest) -> Dict[str, Any]:
+    dataset = generate_facility_dataset(request.num_samples, seed=request.seed)
+    _persist_facility_dataset(dataset)
+    state["facility_dataset"] = dataset
+    logger.info("/facility/simulate generated %s samples", len(dataset["inputs"]))
+    return {
+        "message": "facility dataset generated",
+        "dataset_size": len(dataset["inputs"]),
+    }
+
+
+@app.post("/facility/train")
+async def facility_train(request: FacilityTrainRequest) -> Dict[str, Any]:
+    dataset = state.get("facility_dataset")
+    if dataset is None:
+        dataset = _load_facility_dataset()
+        state["facility_dataset"] = dataset
+
+    cfg = FacilityTrainingConfig(
+        epochs=request.epochs,
+        batch_size=request.batch_size,
+        learning_rate=request.learning_rate,
+        val_split=request.val_split,
+    )
+    result = _train_facility_with_dataset(dataset, cfg)
+    return {"message": "facility surrogate trained", **result}
+
+
+@app.get("/facility/status", response_model=FacilityStatusResponse)
+async def facility_status() -> FacilityStatusResponse:
+    dataset = state.get("facility_dataset")
+    if dataset is not None:
+        dataset_size = len(dataset["inputs"])
+    elif FACILITY_DATA_JSON.exists():
+        payload = json.loads(FACILITY_DATA_JSON.read_text())
+        dataset_size = len(payload.get("inputs", []))
+    else:
+        dataset_size = None
+    history = state.get("facility_training_history")
+    if history is None and FACILITY_TRAINING_LOG_PATH.exists():
+        history = json.loads(FACILITY_TRAINING_LOG_PATH.read_text())
+        state["facility_training_history"] = history
+    last_trained_at = state.get("facility_last_trained_at")
+    if last_trained_at is None and FACILITY_TRAINING_LOG_PATH.exists():
+        last_trained_at = datetime.fromtimestamp(FACILITY_TRAINING_LOG_PATH.stat().st_mtime, tz=timezone.utc).isoformat()
+    has_model = FACILITY_MODEL_PATH.exists() or state.get("facility_surrogate") is not None
+    return FacilityStatusResponse(
+        has_model=has_model,
+        model_path=str(FACILITY_MODEL_PATH) if FACILITY_MODEL_PATH.exists() else None,
+        dataset_size=dataset_size,
+        last_trained_at=last_trained_at,
+        training_history=history,
+    )
+
+
+@app.post("/facility/optimize")
+async def facility_optimize(request: FacilityOptimizeRequest) -> Dict[str, Any]:
+    _ensure_ready()
+    if not _ensure_facility_ready():
+        raise HTTPException(status_code=400, detail="Facility surrogate not ready. Train it first.")
+
+    defaults = state.get("target_params") or {"D": TARGET_DIFFUSION, "v": TARGET_VELOCITY}
+    pipe_D = request.pipe_D if request.pipe_D is not None else defaults.get("D", TARGET_DIFFUSION)
+    pipe_v = request.pipe_v if request.pipe_v is not None else defaults.get("v", TARGET_VELOCITY)
+    pipe_t = request.pipe_t if request.pipe_t is not None else state.get("target_time") or 0.6
+
+    pipe_context = _compute_pipe_context(pipe_D, pipe_v, pipe_t)
+    facility_model = _get_facility_surrogate_or_load()
+
+    init_mean = (
+        request.initial_separator_pressure or 100.0,
+        request.initial_separator_temp or 45.0,
+        request.initial_gas_fraction or 0.5,
+    )
+    cfg = FacilityOptimizationConfig(
+        max_iters=request.max_iters,
+        population=request.population,
+        init_mean=init_mean,
+        device="cpu" if not torch.cuda.is_available() else "cuda",
+    )
+    targets = FacilityOptimizationTargets(
+        vapor_fraction=request.target_vapor_fraction,
+        gas_flow_rate=request.target_gas_flow_rate,
+        liquid_flow_rate=request.target_liquid_flow_rate,
+        weight_vapor=request.weight_vapor,
+        weight_gas=request.weight_gas,
+        weight_liquid=request.weight_liquid,
+    )
+    optimizer = FacilityGaussianOptimizer(facility_model, pipe_context=pipe_context, config=cfg, targets=targets)
+    result = optimizer.run()
+    history_payload = [
+        {
+            "iteration": rec.iteration,
+            "separator_pressure": rec.separator_pressure,
+            "separator_temp": rec.separator_temp,
+            "gas_fraction": rec.gas_fraction,
+            "cost": rec.cost,
+            "metrics": rec.metrics,
+            "gradients": rec.gradients,
+        }
+        for rec in result.history
+    ]
+    result_payload = {
+        "best_controls": result.best_controls,
+        "best_cost": result.best_cost,
+        "best_metrics": result.best_metrics,
+    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+    state["facility_opt_history"] = history_payload
+    state["facility_opt_result"] = result_payload
+    state["facility_opt_pipe_context"] = pipe_context
+    state["facility_opt_timestamp"] = timestamp
+    _persist_facility_optimization(history_payload, result_payload, pipe_context, timestamp)
+    logger.info(
+        "Facility optimization complete: cost=%.4f pressure=%.2f temp=%.2f gas=%.3f",
+        result.best_cost,
+        result.best_controls["separator_pressure"],
+        result.best_controls["separator_temp"],
+        result.best_controls["gas_fraction"],
+    )
+    return {
+        "message": "facility optimization complete",
+        "history": history_payload,
+        "result": result_payload,
+        "pipe_context": pipe_context,
+        "timestamp": timestamp,
+    }
+
+
+@app.get("/facility/optimize/status", response_model=FacilityOptimizeStatusResponse)
+async def facility_optimize_status() -> FacilityOptimizeStatusResponse:
+    history = state.get("facility_opt_history") or []
+    result = state.get("facility_opt_result")
+    pipe_context = state.get("facility_opt_pipe_context")
+    timestamp = state.get("facility_opt_timestamp")
+    if not history and FACILITY_OPT_JSON.exists():
+        payload = json.loads(FACILITY_OPT_JSON.read_text())
+        history = payload.get("history", [])
+        result = payload.get("result")
+        pipe_context = payload.get("pipe_context")
+        timestamp = payload.get("timestamp")
+        state["facility_opt_history"] = history
+        state["facility_opt_result"] = result
+        state["facility_opt_pipe_context"] = pipe_context
+        state["facility_opt_timestamp"] = timestamp
+    return FacilityOptimizeStatusResponse(
+        history=history,
+        result=result,
+        pipe_context=pipe_context,
+        timestamp=timestamp,
+    )
+
+
+@app.post("/pipeline/run")
+async def pipeline_run(request: PipelineRunRequest) -> Dict[str, Any]:
+    if not _ensure_surrogate_ready():
+        raise HTTPException(status_code=400, detail="Pipe surrogate not ready. Train it first.")
+    if not _ensure_facility_ready():
+        raise HTTPException(status_code=400, detail="Facility surrogate not ready. Train it first.")
+
+    if state.get("x_grid") is None:
+        reference = _build_reference_state(state["simulation_config"])
+        _apply_reference_state(reference)
+
+    x_grid = np.array(state["x_grid"], dtype=np.float32)
+    pipe_controls = PipeControls(diffusion=request.D, velocity=request.v, time=request.t)
+    facility_controls = FacilityControls(
+        separator_pressure=request.separator_pressure,
+        separator_temp=request.separator_temp,
+        gas_fraction=request.gas_fraction,
+    )
+
+    pipe_model = _get_surrogate_or_load()
+    facility_model = _get_facility_surrogate_or_load()
+    result = run_pipeline(pipe_controls, facility_controls, pipe_model, facility_model, x_grid)
+    state["pipeline_snapshot"] = result
+    return {"message": "pipeline evaluated", **result}
 
 
 def _ensure_ready() -> None:
@@ -389,6 +816,22 @@ async def start_optimization(request: OptimizeRequest) -> Dict[str, str]:
         init_mean=init_mean,
         device="cpu" if not torch.cuda.is_available() else "cuda",
     )
+    if any(
+        value is not None
+        for value in (request.target_outlet_pressure, request.target_mean_pressure, request.target_gradient)
+    ):
+        opt_cfg.targets = PipeTargetObjectives(
+            outlet_pressure=request.target_outlet_pressure,
+            mean_pressure=request.target_mean_pressure,
+            outlet_gradient=request.target_gradient,
+        )
+        state["pipe_targets"] = {
+            "outlet_pressure": request.target_outlet_pressure,
+            "mean_pressure": request.target_mean_pressure,
+            "outlet_gradient": request.target_gradient,
+        }
+    else:
+        state["pipe_targets"] = None
     optimizer = GaussianOptimizer(
         surrogate=surrogate,
         x_grid=state["x_grid"],
@@ -417,9 +860,13 @@ async def start_optimization(request: OptimizeRequest) -> Dict[str, str]:
             "v": record.v,
             "cost": record.cost,
             "u_profile": record.u_profile,
+            "du_dx_profile": record.du_dx_profile,
             "grad_D": record.grad_D,
             "grad_V": record.grad_V,
             "grad_norm": record.grad_norm,
+            "outlet_pressure": record.outlet_pressure,
+            "mean_pressure": record.mean_pressure,
+            "outlet_gradient": record.outlet_gradient,
         }
         state["history"].append(payload)
         broker.broadcast_threadsafe({"type": "iteration", "payload": payload}, loop)
@@ -444,6 +891,8 @@ async def start_optimization(request: OptimizeRequest) -> Dict[str, str]:
             "best_params": {"D": result.best_params[0], "v": result.best_params[1]},
             "best_cost": result.best_cost,
             "best_profile": result.best_profile,
+            "best_gradient_profile": result.best_gradient_profile,
+            "best_metrics": result.best_metrics,
         }
         _persist_optimization_history(state["history"], state["result"])
         broker.broadcast_threadsafe({"type": "complete", "payload": state["result"]}, loop)
@@ -572,20 +1021,28 @@ async def surrogate_status() -> SurrogateStatusResponse:
                 "D": state["simulation_config"].diffusion_range[0],
                 "v": state["simulation_config"].velocity_range[0],
             }
-            preds = evaluate_profile(
-                surrogate,
-                x=sample_x,
-                t=float(t_val),
-                D=float(params["D"]),
-                v=float(params["v"]),
-                device="cpu",
-            )
+            x_tensor = torch.tensor(sample_x, dtype=torch.float32, requires_grad=True)
+            t_tensor = torch.full_like(x_tensor, float(t_val))
+            D_tensor = torch.full_like(x_tensor, float(params["D"]))
+            v_tensor = torch.full_like(x_tensor, float(params["v"]))
+            inputs = torch.stack([x_tensor, t_tensor, D_tensor, v_tensor], dim=1)
+            preds_tensor = surrogate(inputs).squeeze(-1)
+            du_dx_tensor = torch.autograd.grad(
+                preds_tensor,
+                x_tensor,
+                grad_outputs=torch.ones_like(preds_tensor),
+                create_graph=False,
+                retain_graph=False,
+            )[0]
+            preds = preds_tensor.detach().cpu().numpy()
+            du_dx = du_dx_tensor.detach().cpu().numpy()
             sample_prediction = {
                 "x": sample_x.tolist(),
                 "u_hat": preds.tolist(),
                 "t": float(t_val),
                 "D": float(params["D"]),
                 "v": float(params["v"]),
+                "du_dx": du_dx.tolist(),
             }
         except HTTPException:
             pass

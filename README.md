@@ -47,6 +47,18 @@ Key frontend pieces:
 
   logging every iteration (params, cost, spatial profile) and persisting the history to `backend/exports/optimization_latest.{json,xlsx}`. Use `/ws/updates`, `/status`, `/result`, or `/optimize/history` to visualize convergence.
 
+- **Facility surrogate + optimizer** – A second-stage MLP (`facility_surrogate.py`) consumes the pipe outlet pressure, pipe outlet temperature, throughput, and separator settings \((P_\text{sep}, T_\text{sep}, \phi_\text{gas})\) to predict the facility observables `vapor_fraction`, `gas_flow_rate`, and `liquid_flow_rate`. The standalone facility optimizer minimizes
+
+  $$
+  J_\text{fac} =
+    w_v \big(v_\text{pred} - v_\text{target}\big)^2 +
+    w_g \big(\dot{m}_g - \dot{m}_{g,\text{target}}\big)^2 +
+    w_\ell \big(\dot{m}_\ell - \dot{m}_{\ell,\text{target}}\big)^2 +
+    \lambda_\text{reg} \|\theta_\text{sep}\|_2^2,
+  $$
+
+  by sampling separator pressure/temperature/gas-fraction triplets, evaluating the facility surrogate, and adapting the Gaussian mean/std exactly like the pipe-stage optimizer. Every run is persisted to `backend/exports/facility_optimization_latest.{json,xlsx}` with the per-iteration metrics and gradients.
+
 ## Backend: local development (no Docker required)
 
 ```bash
@@ -70,7 +82,11 @@ The optimizer requires `/simulate` to be called once (POST) before `/optimize` s
 | `/surrogate/history` | GET | Returns the stored training loss history (epoch vs. train/validation losses). Useful for plotting convergence. |
 | `/surrogate/predict` | POST | Runs inference with the latest surrogate. Body: `{ "x": [...], "t": float, "D": float, "v": float }`. Returns `{ "x": [...], "u_hat": [...] }`. |
 | `/surrogate/status` | GET | Summarizes surrogate health: whether a model is available, dataset size, last training timestamp/epochs, latest training loss history, and a sample prediction for plotting dashboards. |
-| `/optimize/history` | GET | Returns the most recent optimization iteration history and summary (memory or `backend/exports/optimization_latest.json`). |
+| `/facility/simulate` | POST | Generates a synthetic facility/separator dataset (pipe outputs + separator setpoints) and caches it under `backend/data/facility_latest.json`. |
+| `/facility/train` | POST | Trains the facility surrogate using the cached dataset. Body: `{"epochs": int, "batch_size": int, "learning_rate": float, "val_split": float}`. Stores weights under `backend/artifacts/facility_surrogate.pt`. |
+| `/facility/status` | GET | Indicates whether the facility surrogate is trained, shows dataset size, last-trained timestamp, and loss history. |
+| `/pipeline/run` | POST | Runs the current pipe → facility surrogate chain given `{ "D": float, "v": float, "t": float, "separator_pressure": float, "separator_temp": float, "gas_fraction": float }` and returns both stage outputs. |
+| `/optimize/history` | GET | Returns the most recent optimization iteration history and summary (each record now includes `du_dx_profile` alongside `u_profile`). |
 | `/optimize` | POST | Launches the Gaussian sampling optimizer. Body: `{"max_iters": int, "population": int, "initial_D": optional, "initial_V": optional}`. Streams iteration updates via WebSocket. |
 | `/optimize/stop` | POST | Requests early termination of the optimizer loop. |
 | `/status` | GET | Snapshot of the running flag, iteration history, and final result (if available). |
@@ -124,8 +140,8 @@ All log output (INFO level) is printed directly to the terminal where you run `u
   - Use this endpoint (or its WebSocket-friendly equivalent you can build) to drive live plots of training curves and surrogate predictions.
 
 - **POST /optimize**
-  - Input: `{ "max_iters": int, "population": int, "initial_D": optional float, "initial_V": optional float }`.
-  - Response: `{ "status": "started" }`. Live updates stream via `/ws/updates`; `/status` and `/result` provide pull-based snapshots. Upon completion, the backend writes `backend/exports/optimization_latest.json` (plus `.xlsx` sheets) for visualization. If an in-memory surrogate is missing, the endpoint automatically loads `backend/artifacts/surrogate_latest.pt` (and regenerates the reference target profile) before starting.
+  - Input: `{ "max_iters": int, "population": int, "initial_D": optional float, "initial_V": optional float, "target_outlet_pressure": optional float, "target_mean_pressure": optional float, "target_gradient": optional float }`.
+  - Response: `{ "status": "started" }`. The optional `target_*` fields come directly from the UI knobs and let you optimize toward desired **outputs** (outlet pressure, mean line pressure, and outlet gradient) while keeping the surrogate weights frozen. Live updates stream via `/ws/updates`; `/status` and `/result` provide pull-based snapshots. Upon completion, the backend writes `backend/exports/optimization_latest.json` (plus `.xlsx` sheets) for visualization. If an in-memory surrogate is missing, the endpoint automatically loads `backend/artifacts/surrogate_latest.pt` (and regenerates the reference target profile) before starting.
 
 - **GET /optimize/history**
   - Input: none.
@@ -144,6 +160,30 @@ All log output (INFO level) is printed directly to the terminal where you run `u
 - **WebSocket /ws/updates**
   - Messages: `{ "type": "iteration", "payload": {"iteration": int, ...} }` and `{ "type": "complete", "payload": {...} }`.
 
+### Facility + sequential pipeline endpoints
+
+- **POST /facility/simulate**
+  - Input: `{ "num_samples": int, "seed": optional }`.
+  - Generates a synthetic facility-stage dataset (pipe outlet pressure/temperature/throughput + separator settings → vapor/gas/liquid outputs). Saves the JSON payload to `backend/data/facility_latest.json` and caches it in-memory for `/facility/train`.
+
+- **POST /facility/train**
+  - Input mirrors the pipe surrogate (`epochs`, `batch_size`, `learning_rate`, `val_split`). Uses the cached dataset or reloads `backend/data/facility_latest.json` if needed. Persists weights to `backend/artifacts/facility_surrogate.pt` and the epoch-by-epoch losses to `backend/artifacts/facility_training_history.json`.
+
+- **GET /facility/status**
+  - Response: `{ "has_model": bool, "dataset_size": int | null, "last_trained_at": str | null, "training_history": [...] }`.
+  - Lets the UI/CLI confirm whether the facility surrogate is ready, how large the latest dataset is, and when it was last trained.
+
+- **POST /pipeline/run**
+  - Input: pipe controls (`D`, `v`, `t`) plus facility knobs (`separator_pressure`, `separator_temp`, `gas_fraction`).
+  - Runs the sequential evaluation (pipe surrogate → facility surrogate) and returns both stage outputs as well as the feature vector fed into the facility surrogate. The result is also cached under `state["pipeline_snapshot"]` so the UI can refresh without re-running the API call.
+
+- **POST /facility/optimize**
+  - Input: `{ "max_iters": 20, "population": 20, "initial_separator_pressure": 100, "initial_separator_temp": 45, "initial_gas_fraction": 0.5, "target_vapor_fraction": 0.65, "target_gas_flow_rate": 18, "target_liquid_flow_rate": 20, "pipe_D": optional, "pipe_v": optional, "pipe_t": optional }`.
+  - Launches the facility-only Gaussian optimizer. It samples separator settings, evaluates the facility surrogate (conditioned on the supplied pipe context), and adapts the Gaussian mean/std exactly like the pipe optimizer. Returns `{ "history": [...], "result": {...}, "pipe_context": {...}, "timestamp": ... }` and persists summaries to `backend/exports/facility_optimization_latest.{json,xlsx}` for later visualization.
+
+- **GET /facility/optimize/status**
+  - Returns the latest `{ history, result, pipe_context, timestamp }` bundle so the UI retains facility cost/gradient curves even after restarting the backend.
+
 ## Frontend: local development
 
 ```bash
@@ -159,11 +199,11 @@ The UI expects the backend at `http://localhost:8000`. Adjust `BackendService` i
 The dashboard stitches together every API described above so you can inspect the full workflow without touching Swagger:
 
 1. **Controls panel (top-left)** –  
-   - *Simulate & Train* calls `/simulate-train`, regenerating surrogate data, training the network, and refreshing the training-loss chart.  
-   - *Refresh Status* calls `/surrogate/status` to pull the latest metadata/artifacts, so you can verify whether a model is loaded (even after a backend restart).  
-   - *Load Last Run* pulls `/optimize/history`, repopulating the cost chart & profile plot with the most recent optimization logs written to disk.  
-   - The sliders & numeric inputs configure the optimizer’s Gaussian search (`initialD`, `initialV`, `maxIters`, `population`).  
-   - Status badges beneath the buttons echo the surrogate metadata (dataset size, last trained timestamp, model path).
+   - The stage toggle (Pipe ⇄ Facility) swaps the entire knob stack, Actions pane, and chart context. **Pipe mode now exposes only output knobs**—target outlet pressure, target mean pressure, and target outlet gradient—which feed directly into `/optimize` as `target_*` fields. Facility mode exposes separator pressure/temperature/gas sliders (still inputs), the facility objective knobs (target vapor/gas/liquid), and facility optimizer iteration/population sliders.  
+   - *Simulate & Train* calls `/simulate-train`, regenerating surrogate data, training the network, and refreshing the training-loss chart. In Facility mode, the equivalent **Simulate Facility** / **Train Facility Surrogate** buttons call `/facility/simulate` and `/facility/train`.  
+   - *Refresh Status* calls `/surrogate/status`; in Facility mode the surrogate status card switches automatically to `/facility/status`.  
+   - *Load Last Run* pulls `/optimize/history`, repopulating the cost chart & profile plot with the most recent pipe-stage optimization logs. Facility mode keeps the same button but displays `/facility/optimize/status` results in the charts.  
+   - Status badges beneath the buttons echo the active stage’s metadata (dataset size, last trained timestamp, model path, and—when available—the facility optimizer summary).
 
 2. **Pressure profile chart (top row, center)** –  
    Overlays three curves: the red dashed **target profile** from the physics simulation, the blue **surrogate prediction** at the preview point (or live during training), and the teal dashed **optimizer best profile** that updates every iteration. This makes it obvious how the surrogate approximates the target and how the optimizer steers the surrogate output toward that target over time. The note under the chart indicates the \(t, D, v\) values used for the current preview.
@@ -177,14 +217,23 @@ The dashboard stitches together every API described above so you can inspect the
 5. **Gradient trend chart (middle row)** –  
    Uses the gradient telemetry (`grad_D`, `grad_V`, `grad_norm`) computed each optimizer iteration. It helps diagnose how sensitive the objective is to each parameter during stochastic search—flat gradients often signal convergence or surrogate saturation.
 
-6. **Result panel & surrogate snapshot (bottom-left)** –  
+6. **Spatial gradient chart (bottom row)** –  
+   Shows the surrogate’s spatial derivative \( \partial u/\partial x \) alongside the target and optimizer best-so-far gradient. Sharp peaks line up with pressure drops, so you can confirm the PINN matches slope as well as absolute values. The chart pulls the new `du_dx_profile` field streamed during optimization, plus the live surrogate preview (`/surrogate/status`).
+
+7. **Result panel & surrogate snapshot (bottom-left)** –  
    The `ResultPanelComponent` shows the live/optimized parameters: the top line displays the current iteration’s D, v, cost; once optimization finishes, it locks in the best parameters, cost, and profile. Adjacent to it, the “Surrogate Snapshot” card lists dataset size, epoch count, and whether a model is present—all derived from `/surrogate/status`.
 
-7. **Activity log (bottom-right)** –  
+8. **Activity log (bottom-right)** –  
    Streams textual events (start/stop, iteration summaries, API fallback messages) so you can trace what just happened.
 
-8. **Dark-mode toggle (top-right corner)** –  
+9. **Dark-mode toggle (top-right corner)** –  
    The sun/moon switch applies a full-surface theme (page background, header, panes, metric subcards, and chart canvases). The state is stored in the dashboard component so the UI keeps your preference while you navigate.
+
+10. **Facility optimizer view (toggle to “Facility”)** –  
+    - The pressure chart switches to a facility KPI bar chart (vapor fraction, gas flow, liquid flow) driven either by `/pipeline/run` or the latest `/facility/optimize` run.  
+    - The cost chart plots the facility optimizer’s \(J_\text{fac}\) vs. iteration, and the gradient chart shows the three partial derivatives `∂J/∂P`, `∂J/∂T`, and `∂J/∂Gas`.  
+    - The Actions pane exposes **Simulate Facility**, **Train Facility Surrogate**, **Run Pipe ➜ Facility**, and **Optimize Facility** (which calls `/facility/optimize`).  
+    - The surrogate status card morphs into a facility summary, echoing dataset size/model path plus the most recent best separator settings. The summary includes the timestamp and the pipe context that the optimizer conditioned on, so you can tell which upstream conditions produced the shown optimum.
 
 #### UI controls & optimization status quick reference
 
@@ -239,9 +288,15 @@ curl -X POST http://localhost:8000/simulate -H 'Content-Type: application/json' 
 
 > Want to retrain directly from Swagger? Call `POST /surrogate/train`. By default it will load `backend/data/surrogate_latest.json`, but you can also include a `dataset` field (`{"inputs": [...], "targets": [...]}`), a `dataset_path` (e.g., `"data/surrogate_latest.xlsx"`), plus hyperparameters. Every training call writes the weights to `backend/artifacts/surrogate_latest.pt` and its per-epoch losses to `backend/artifacts/surrogate_training_history.json`.
 
+> Facility datasets follow the same convention: `/facility/simulate` writes `backend/data/facility_latest.json`, `/facility/train` produces `backend/artifacts/facility_surrogate.pt`, and the per-epoch losses land in `backend/artifacts/facility_training_history.json`. These files power the facility status card and the facility-only optimizer.
+
 > **Where is the surrogate stored?** Both `/simulate` and `/surrogate/train` export the latest weights to `backend/artifacts/surrogate_latest.pt` and log per-epoch metrics to `backend/artifacts/surrogate_training_history.json`. The inference endpoint and optimizer automatically load from these artifacts if no in-memory model exists.
 
 > **Where is the optimization log stored?** After every `/optimize` run finishes, the backend persists the iteration history and summary to `backend/exports/optimization_latest.json` (and `.xlsx`). Use these files for downstream dashboards without re-running the optimizer.
+
+> Each iteration row now includes the observed outlet pressure, mean pressure, and outlet gradient so you can confirm whether the optimizer is steering the surrogate toward the target knobs. The summary tab also records the best-achieved metrics alongside the best `(D, v)` pair.
+
+> Facility-only optimizer runs are stored the same way under `backend/exports/facility_optimization_latest.json` (plus `.xlsx`). Each row includes separator settings, cost, predicted vapor/gas/liquid outputs, and gradients (`dJ/dP`, `dJ/dT`, `dJ/dGas`) so you can graph sensitivities over time.
 
 > Need a consolidated surrogate status feed? Poll `GET /surrogate/status`—it reports whether a model is ready, the dataset size that produced it, timestamps/epochs, the full train/validation loss history, and a sample prediction you can pipe directly into charts.
 

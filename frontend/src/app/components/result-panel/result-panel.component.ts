@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, Input } from '@angular/core';
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 
 import { IterationPayload, OptimizationResult } from '../../services/backend.service';
 
@@ -14,6 +14,8 @@ export class ResultPanelComponent {
   @Input() running = false;
   @Input() currentIteration?: IterationPayload;
   @Input() finalResult?: OptimizationResult;
+  @Output() hoverChange = new EventEmitter<boolean>();
+  @Output() stageChange = new EventEmitter<'pipe' | 'facility'>();
 
   formatValue(value: number | undefined | null, digits = 3): string {
     if (value === undefined || value === null) {
@@ -21,4 +23,6 @@ export class ResultPanelComponent {
     }
     return value.toFixed(digits);
   }
+
+  hovered = false;
 }

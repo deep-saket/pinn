@@ -1,4 +1,6 @@
-<div class="result-panel">
+<div class="result-panel"
+     (mouseenter)="hovered = true; hoverChange.emit(true)"
+     (mouseleave)="hovered = false; hoverChange.emit(false)">
   <div class="status-header">
     <h2>Optimization Status</h2>
     <div class="status-chip" [class.running]="running">{{ running ? 'Running' : 'Idle' }}</div>
