@@ -18,6 +18,10 @@ import {
   FacilityOptimizeResult,
   FacilityOptimizeStatus,
   FacilityStatus,
+  FinancialOptimizeHistoryEntry,
+  FinancialOptimizeResult,
+  FinancialOptimizeStatus,
+  FinancialStatus,
   IterationPayload,
   OptimizationHistoryResponse,
   OptimizationResult,
@@ -54,6 +58,12 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     gasFraction: 0.5,
   };
 
+  financialControls = {
+    pricePerUnit: 80,
+    hedgeRatio: 0.5,
+    opexMultiplier: 1.0,
+  };
+
   pipeTargets = {
     outletPressure: 185,
     meanPressure: 150,
@@ -85,17 +95,32 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
   surrogateGradientPreview: number[] = [];
   surrogateStatus?: SurrogateStatus;
   facilityStatus?: FacilityStatus;
+  financialStatus?: FinancialStatus;
   trainingHistory: TrainingHistoryEntry[] = [];
   facilityTrainingHistory: FacilityHistoryEntry[] = [];
+  financialTrainingHistory: FacilityHistoryEntry[] = [];
   facilityOptimizationHistory: FacilityOptimizeHistoryEntry[] = [];
   facilityOptimizationResult: FacilityOptimizeResult | null = null;
   facilityOptimizationTimestamp: string | null = null;
   facilityPipeContext: { outlet_pressure: number; temperature: number; throughput: number } | null = null;
+  financialOptimizationHistory: FinancialOptimizeHistoryEntry[] = [];
+  financialOptimizationResult: FinancialOptimizeResult | null = null;
+  financialOptimizationTimestamp: string | null = null;
+  financialFacilityContext: { vapor_fraction: number; gas_flow_rate: number; liquid_flow_rate: number } | null = null;
   statusLog: string[] = [];
   errorMessage = '';
   facilityError = '';
   facilityOptError = '';
+  financialError = '';
+  financialOptError = '';
   facilityTraining = {
+    numSamples: 2000,
+    epochs: 150,
+    batchSize: 256,
+    learningRate: 1e-3,
+    valSplit: 0.2,
+  };
+  financialTraining = {
     numSamples: 2000,
     epochs: 150,
     batchSize: 256,
@@ -112,11 +137,20 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     liquidFlow: 20,
   };
   facilityOptimizerBusy = false;
+  financialOptimizationControls = {
+    maxIters: 20,
+    population: 20,
+  };
+  financialObjectives = {
+    netProfit: 800,
+    riskIndex: 5,
+  };
+  financialOptimizerBusy = false;
   pipelinePreview: PipelineRunResponse | null = null;
-  stageView: 'pipe' | 'facility' = 'pipe';
-  statusOverlay: { stage: 'pipe' | 'facility'; x: number; y: number } | null = null;
+  stageView: 'pipe' | 'facility' | 'financial' = 'pipe';
+  statusOverlay: { stage: 'pipe' | 'facility' | 'financial'; x: number; y: number } | null = null;
 
-  setStage(view: 'pipe' | 'facility'): void {
+  setStage(view: 'pipe' | 'facility' | 'financial'): void {
     if (this.stageView === view) {
       return;
     }
@@ -155,6 +189,8 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     this.refreshSurrogateStatus();
     this.refreshFacilityStatus();
     this.refreshFacilityOptimizationStatus();
+    this.refreshFinancialStatus();
+    this.refreshFinancialOptimizationStatus();
     this.loadOptimizationHistory();
   }
 
@@ -327,6 +363,39 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
       });
   }
 
+  simulateFinancialDataset(): void {
+    this.financialError = '';
+    this.backend.financialSimulate(this.financialTraining.numSamples).subscribe({
+      next: (response) => {
+        this.logMessage(`Financial dataset generated with ${response.dataset_size} samples.`);
+        this.refreshFinancialStatus();
+      },
+      error: () => {
+        this.financialError = 'Failed to simulate financial dataset.';
+      },
+    });
+  }
+
+  trainFinancialSurrogate(): void {
+    this.financialError = '';
+    this.backend
+      .financialTrain({
+        epochs: this.financialTraining.epochs,
+        batch_size: this.financialTraining.batchSize,
+        learning_rate: this.financialTraining.learningRate,
+        val_split: this.financialTraining.valSplit,
+      })
+      .subscribe({
+        next: () => {
+          this.logMessage('Financial surrogate trained.');
+          this.refreshFinancialStatus();
+        },
+        error: () => {
+          this.financialError = 'Failed to train financial surrogate.';
+        },
+      });
+  }
+
   refreshFacilityStatus(): void {
     this.backend.fetchFacilityStatus().subscribe({
       next: (status) => {
@@ -364,8 +433,58 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     });
   }
 
+  refreshStageStatus(): void {
+    if (this.stageView === 'pipe') {
+      this.refreshSurrogateStatus();
+    } else if (this.stageView === 'facility') {
+      this.refreshFacilityStatus();
+      this.refreshFacilityOptimizationStatus();
+    } else {
+      this.refreshFinancialStatus();
+      this.refreshFinancialOptimizationStatus();
+    }
+  }
+
+  refreshFinancialStatus(): void {
+    this.backend.fetchFinancialStatus().subscribe({
+      next: (status) => {
+        this.financialStatus = status;
+        const rawHistory = status.training_history ?? [];
+        this.financialTrainingHistory = rawHistory.map((entry: any) => ({
+          epoch: entry.epoch,
+          train_loss: entry.train_loss ?? entry.train_total_loss ?? entry.total_loss ?? null,
+          val_loss: entry.val_loss ?? entry.val_total_loss ?? null,
+        }));
+        if (this.stageView === 'financial') {
+          this.updateCostChart();
+          this.updateGradientChart();
+        }
+      },
+      error: () => {
+        this.logMessage('Unable to fetch financial status.');
+      },
+    });
+  }
+
+  refreshFinancialOptimizationStatus(): void {
+    this.backend.fetchFinancialOptimizationStatus().subscribe({
+      next: (status: FinancialOptimizeStatus) => {
+        this.financialOptimizationHistory = status.history ?? [];
+        this.financialOptimizationResult = status.result ?? null;
+        this.financialOptimizationTimestamp = status.timestamp ?? null;
+        this.financialFacilityContext = status.facility_context ?? null;
+        this.updateCostChart();
+        this.updateGradientChart();
+      },
+      error: () => {
+        this.logMessage('Unable to fetch financial optimization status.');
+      },
+    });
+  }
+
   runPipeline(): void {
     this.facilityError = '';
+    this.financialError = '';
     const pipeInputs = this.resolvePipeInputs();
     this.backend
       .runPipeline({
@@ -375,6 +494,9 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         separator_pressure: this.pipelineControls.separatorPressure,
         separator_temp: this.pipelineControls.separatorTemp,
         gas_fraction: this.pipelineControls.gasFraction,
+        price_per_unit: this.financialControls.pricePerUnit,
+        hedge_ratio: this.financialControls.hedgeRatio,
+        opex_multiplier: this.financialControls.opexMultiplier,
       })
       .subscribe({
         next: (response) => {
@@ -386,7 +508,8 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
           this.refreshCharts();
         },
         error: () => {
-          this.facilityError = 'Pipeline run failed. Ensure both surrogates are trained.';
+          this.facilityError = 'Pipeline run failed. Ensure surrogates are trained.';
+          this.financialError = 'Pipeline run failed. Ensure surrogates are trained.';
         },
       });
   }
@@ -426,6 +549,49 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         error: () => {
           this.facilityOptimizerBusy = false;
           this.facilityOptError = 'Failed to optimize facility.';
+        },
+      });
+  }
+
+  optimizeFinancial(): void {
+    if (this.financialOptimizerBusy) {
+      return;
+    }
+    this.financialOptError = '';
+    this.financialOptimizerBusy = true;
+    const pipeInputs = this.resolvePipeInputs();
+    this.backend
+      .optimizeFinancial({
+        max_iters: this.financialOptimizationControls.maxIters,
+        population: this.financialOptimizationControls.population,
+        initial_price: this.financialControls.pricePerUnit,
+        initial_hedge: this.financialControls.hedgeRatio,
+        initial_opex: this.financialControls.opexMultiplier,
+        target_net_profit: this.financialObjectives.netProfit,
+        target_risk_index: this.financialObjectives.riskIndex,
+        weight_profit: 1.0,
+        weight_risk: 0.6,
+        pipe_D: pipeInputs.D,
+        pipe_v: pipeInputs.v,
+        pipe_t: this.stateTargetTime(),
+        separator_pressure: this.pipelineControls.separatorPressure,
+        separator_temp: this.pipelineControls.separatorTemp,
+        gas_fraction: this.pipelineControls.gasFraction,
+      })
+      .subscribe({
+        next: (response) => {
+          this.financialOptimizationHistory = response.history;
+          this.financialOptimizationResult = response.result;
+          this.financialOptimizationTimestamp = response.timestamp;
+          this.financialFacilityContext = response.facility_context;
+          this.financialOptimizerBusy = false;
+          this.logMessage('Financial optimization complete.');
+          this.updateCostChart();
+          this.updateGradientChart();
+        },
+        error: () => {
+          this.financialOptimizerBusy = false;
+          this.financialOptError = 'Failed to optimize financial stage.';
         },
       });
   }
@@ -679,7 +845,7 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         this.pressureChart.data.datasets[2].label = 'Optimizer profile';
         this.pressureChart.data.datasets[2].data = this.currentProfile ?? optimizerData;
       }
-    } else {
+    } else if (this.stageView === 'facility') {
       const facility = this.pipelinePreview?.facility;
       const labels = ['Vapor Fraction', 'Gas Flow', 'Liquid Flow'];
       const values = [
@@ -689,6 +855,21 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
       ];
       this.pressureChart.data.labels = labels;
       this.pressureChart.data.datasets[0].label = 'Facility outputs';
+      this.pressureChart.data.datasets[0].data = values;
+      if (this.pressureChart.data.datasets[1]) {
+        this.pressureChart.data.datasets[1].label = '';
+        this.pressureChart.data.datasets[1].data = [];
+      }
+      if (this.pressureChart.data.datasets[2]) {
+        this.pressureChart.data.datasets[2].label = '';
+        this.pressureChart.data.datasets[2].data = [];
+      }
+    } else {
+      const financial = this.pipelinePreview?.financial;
+      const labels = ['Net Profit', 'Risk Index'];
+      const values = [financial?.net_profit ?? 0, financial?.risk_index ?? 0];
+      this.pressureChart.data.labels = labels;
+      this.pressureChart.data.datasets[0].label = 'Financial metrics';
       this.pressureChart.data.datasets[0].data = values;
       if (this.pressureChart.data.datasets[1]) {
         this.pressureChart.data.datasets[1].label = '';
@@ -754,6 +935,33 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         this.costChart.data.datasets[1].label = 'Facility val loss';
         this.costChart.data.datasets[1].data = history.map((entry) => entry.val_loss ?? null);
       }
+    } else if (this.stageView === 'financial') {
+      if (this.financialOptimizationHistory.length) {
+        const history = this.financialOptimizationHistory;
+        this.costChart.data.labels = history.map((entry) => entry.iteration.toString());
+        this.costChart.data.datasets[0].label = 'Financial cost';
+        this.costChart.data.datasets[0].data = history.map((entry) => entry.cost);
+        if (this.costChart.data.datasets[1]) {
+          this.costChart.data.datasets[1].label = '';
+          this.costChart.data.datasets[1].data = [];
+        }
+      } else {
+        const history = this.financialTrainingHistory;
+        this.costChart.data.labels = history.map((entry) => entry.epoch);
+        const trainDataset = this.costChart.data.datasets[0];
+        trainDataset.label = 'Financial train loss';
+        trainDataset.data = history.map((entry) => entry.train_loss ?? entry.train_total_loss ?? null);
+        if (!this.costChart.data.datasets[1]) {
+          this.costChart.data.datasets[1] = {
+            label: 'Financial val loss',
+            data: [],
+            borderColor: '#f87171',
+            tension: 0.2,
+          };
+        }
+        this.costChart.data.datasets[1].label = 'Financial val loss';
+        this.costChart.data.datasets[1].data = history.map((entry) => entry.val_loss ?? null);
+      }
     } else {
       this.costChart.data.labels = this.iterationLabels;
       this.costChart.data.datasets[0].label = 'Cost';
@@ -802,6 +1010,30 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
           this.gradChart.data.datasets[2].data = [];
         }
       }
+    } else if (this.stageView === 'financial') {
+      if (this.financialOptimizationHistory.length) {
+        const history = this.financialOptimizationHistory;
+        this.gradChart.data.labels = history.map((entry) => entry.iteration.toString());
+        this.gradChart.data.datasets[0].label = '∂J/∂Price';
+        this.gradChart.data.datasets[0].data = history.map((entry) => entry.gradients?.dJ_dPrice ?? null);
+        this.gradChart.data.datasets[1].label = '∂J/∂Hedge';
+        this.gradChart.data.datasets[1].data = history.map((entry) => entry.gradients?.dJ_dHedge ?? null);
+        if (this.gradChart.data.datasets[2]) {
+          this.gradChart.data.datasets[2].label = '∂J/∂Opex';
+          this.gradChart.data.datasets[2].data = history.map((entry) => entry.gradients?.dJ_dOpex ?? null);
+        }
+      } else {
+        const history = this.financialTrainingHistory;
+        this.gradChart.data.labels = history.map((entry) => entry.epoch);
+        this.gradChart.data.datasets[0].label = 'Train loss';
+        this.gradChart.data.datasets[0].data = history.map((entry) => entry.train_loss ?? entry.train_total_loss ?? null);
+        this.gradChart.data.datasets[1].label = 'Val loss';
+        this.gradChart.data.datasets[1].data = history.map((entry) => entry.val_loss ?? null);
+        if (this.gradChart.data.datasets[2]) {
+          this.gradChart.data.datasets[2].label = '';
+          this.gradChart.data.datasets[2].data = [];
+        }
+      }
     } else {
       this.gradChart.data.labels = this.gradLabels;
       this.gradChart.data.datasets[0].label = '∂J/∂D';
@@ -831,6 +1063,23 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
         this.pipelineControls.gasFraction,
       ];
       this.gradProfileChart.data.datasets[0].label = 'Facility controls';
+      this.gradProfileChart.data.datasets[0].data = values;
+      if (this.gradProfileChart.data.datasets[1]) {
+        this.gradProfileChart.data.datasets[1].label = '';
+        this.gradProfileChart.data.datasets[1].data = [];
+      }
+      if (this.gradProfileChart.data.datasets[2]) {
+        this.gradProfileChart.data.datasets[2].label = '';
+        this.gradProfileChart.data.datasets[2].data = [];
+      }
+    } else if (this.stageView === 'financial') {
+      this.gradProfileChart.data.labels = ['Price', 'Hedge', 'Opex'];
+      const values = [
+        this.financialControls.pricePerUnit,
+        this.financialControls.hedgeRatio,
+        this.financialControls.opexMultiplier,
+      ];
+      this.gradProfileChart.data.datasets[0].label = 'Financial controls';
       this.gradProfileChart.data.datasets[0].data = values;
       if (this.gradProfileChart.data.datasets[1]) {
         this.gradProfileChart.data.datasets[1].label = '';
@@ -979,11 +1228,14 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.stageView === 'facility') {
       return this.facilityOptimizationHistory.length > 0 || this.facilityTrainingHistory.length > 0;
     }
+    if (this.stageView === 'financial') {
+      return this.financialOptimizationHistory.length > 0 || this.financialTrainingHistory.length > 0;
+    }
     return this.gradLabels.length > 0;
   }
 
   hasSpatialGradientSamples(): boolean {
-    if (this.stageView === 'facility') {
+    if (this.stageView === 'facility' || this.stageView === 'financial') {
       return true;
     }
     return (
@@ -1004,7 +1256,18 @@ export class DashboardComponent implements OnInit, AfterViewInit, OnDestroy {
     return new Date(parsed).toLocaleString();
   }
 
-  showStatusOverlay(stage: 'pipe' | 'facility', event: MouseEvent): void {
+  financialOptimizationTimestampLabel(): string | null {
+    if (!this.financialOptimizationTimestamp) {
+      return null;
+    }
+    const parsed = Date.parse(this.financialOptimizationTimestamp);
+    if (Number.isNaN(parsed)) {
+      return this.financialOptimizationTimestamp;
+    }
+    return new Date(parsed).toLocaleString();
+  }
+
+  showStatusOverlay(stage: 'pipe' | 'facility' | 'financial', event: MouseEvent): void {
     const target = event.currentTarget as HTMLElement;
     const targetRect = target.getBoundingClientRect();
     const parentRect = this.statusPanel?.nativeElement.getBoundingClientRect();

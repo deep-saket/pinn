@@ -10,6 +10,7 @@ import torch
 
 from surrogate_model import evaluate_profile
 from facility_surrogate import evaluate_facility
+from financial_surrogate import evaluate_financial
 
 
 @dataclass
@@ -27,6 +28,13 @@ class FacilityControls:
 
 
 @dataclass
+class FinancialControls:
+    price_per_unit: float
+    hedge_ratio: float
+    opex_multiplier: float
+
+
+@dataclass
 class PipeStageOutput:
     x: List[float]
     profile: List[float]
@@ -40,6 +48,12 @@ class FacilityStageOutput:
     vapor_fraction: float
     gas_flow_rate: float
     liquid_flow_rate: float
+
+
+@dataclass
+class FinancialStageOutput:
+    net_profit: float
+    risk_index: float
 
 
 def _finite_difference(x: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -76,8 +90,10 @@ def _pipe_to_facility_features(
 def run_pipeline(
     pipe_controls: PipeControls,
     facility_controls: FacilityControls,
+    financial_controls: FinancialControls | None,
     pipe_surrogate,
     facility_surrogate,
+    financial_surrogate,
     x_grid: np.ndarray,
 ) -> Dict[str, Dict[str, float | List[float]]]:
     if x_grid is None or len(x_grid) == 0:
@@ -116,8 +132,34 @@ def run_pipeline(
         liquid_flow_rate=float(facility_preds[2]),
     )
 
-    return {
+    result: Dict[str, Dict[str, float | List[float]]] = {
         "pipe": pipe_stage.__dict__,
         "facility": facility_stage.__dict__,
         "facility_features": facility_features.tolist(),
     }
+
+    if financial_surrogate is not None and financial_controls is not None:
+        fin_features = np.array(
+            [
+                facility_stage.vapor_fraction,
+                facility_stage.gas_flow_rate,
+                facility_stage.liquid_flow_rate,
+                financial_controls.price_per_unit,
+                financial_controls.hedge_ratio,
+                financial_controls.opex_multiplier,
+            ],
+            dtype=np.float32,
+        )
+        financial_preds = evaluate_financial(
+            financial_surrogate,
+            fin_features[None, :],
+            device="cpu",
+        )[0]
+        financial_stage = FinancialStageOutput(
+            net_profit=float(financial_preds[0]),
+            risk_index=float(financial_preds[1]),
+        )
+        result["financial"] = financial_stage.__dict__
+        result["financial_features"] = fin_features.tolist()
+
+    return result

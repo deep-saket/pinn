@@ -81,6 +81,14 @@ export interface FacilityStatus {
   training_history?: { epoch: number; train_loss: number; val_loss?: number | null }[];
 }
 
+export interface FinancialStatus {
+  has_model: boolean;
+  model_path?: string;
+  dataset_size?: number;
+  last_trained_at?: string;
+  training_history?: { epoch: number; train_loss: number; val_loss?: number | null }[];
+}
+
 export interface PipelineRunResponse {
   message: string;
   pipe: {
@@ -96,6 +104,11 @@ export interface PipelineRunResponse {
     liquid_flow_rate: number;
   };
   facility_features: number[];
+  financial?: {
+    net_profit: number;
+    risk_index: number;
+  };
+  financial_features?: number[];
 }
 
 export interface FacilityOptimizeHistoryEntry {
@@ -142,6 +155,51 @@ export interface FacilityOptimizeStatus {
   history: FacilityOptimizeHistoryEntry[];
   result: FacilityOptimizeResult | null;
   pipe_context?: { outlet_pressure: number; temperature: number; throughput: number };
+  timestamp?: string;
+}
+
+export interface FinancialOptimizeHistoryEntry {
+  iteration: number;
+  price_per_unit: number;
+  hedge_ratio: number;
+  opex_multiplier: number;
+  cost: number;
+  targets: {
+    net_profit?: number;
+    risk_index?: number;
+  };
+  gradients: {
+    dJ_dPrice?: number;
+    dJ_dHedge?: number;
+    dJ_dOpex?: number;
+  };
+}
+
+export interface FinancialOptimizeResult {
+  best_controls: {
+    price_per_unit: number;
+    hedge_ratio: number;
+    opex_multiplier: number;
+  };
+  best_cost: number;
+  best_targets?: {
+    net_profit?: number;
+    risk_index?: number;
+  };
+}
+
+export interface FinancialOptimizeResponse {
+  message: string;
+  history: FinancialOptimizeHistoryEntry[];
+  result: FinancialOptimizeResult;
+  facility_context: { vapor_fraction: number; gas_flow_rate: number; liquid_flow_rate: number };
+  timestamp: string;
+}
+
+export interface FinancialOptimizeStatus {
+  history: FinancialOptimizeHistoryEntry[];
+  result: FinancialOptimizeResult | null;
+  facility_context?: { vapor_fraction: number; gas_flow_rate: number; liquid_flow_rate: number };
   timestamp?: string;
 }
 
@@ -216,6 +274,21 @@ export class BackendService {
     return this.http.get<FacilityStatus>(`${this.apiUrl}/facility/status`);
   }
 
+  financialSimulate(numSamples: number, seed?: number): Observable<{ message: string; dataset_size: number }> {
+    return this.http.post<{ message: string; dataset_size: number }>(`${this.apiUrl}/financial/simulate`, {
+      num_samples: numSamples,
+      seed,
+    });
+  }
+
+  financialTrain(payload: { epochs: number; batch_size: number; learning_rate: number; val_split: number }): Observable<any> {
+    return this.http.post(`${this.apiUrl}/financial/train`, payload);
+  }
+
+  fetchFinancialStatus(): Observable<FinancialStatus> {
+    return this.http.get<FinancialStatus>(`${this.apiUrl}/financial/status`);
+  }
+
   runPipeline(body: {
     D: number;
     v: number;
@@ -223,6 +296,9 @@ export class BackendService {
     separator_pressure: number;
     separator_temp: number;
     gas_fraction: number;
+    price_per_unit: number;
+    hedge_ratio: number;
+    opex_multiplier: number;
   }): Observable<PipelineRunResponse> {
     return this.http.post<PipelineRunResponse>(`${this.apiUrl}/pipeline/run`, body);
   }
@@ -248,6 +324,30 @@ export class BackendService {
 
   fetchFacilityOptimizationStatus(): Observable<FacilityOptimizeStatus> {
     return this.http.get<FacilityOptimizeStatus>(`${this.apiUrl}/facility/optimize/status`);
+  }
+
+  optimizeFinancial(body: {
+    max_iters: number;
+    population: number;
+    initial_price?: number;
+    initial_hedge?: number;
+    initial_opex?: number;
+    target_net_profit?: number | null;
+    target_risk_index?: number | null;
+    weight_profit?: number;
+    weight_risk?: number;
+    pipe_D?: number;
+    pipe_v?: number;
+    pipe_t?: number;
+    separator_pressure?: number;
+    separator_temp?: number;
+    gas_fraction?: number;
+  }): Observable<FinancialOptimizeResponse> {
+    return this.http.post<FinancialOptimizeResponse>(`${this.apiUrl}/financial/optimize`, body);
+  }
+
+  fetchFinancialOptimizationStatus(): Observable<FinancialOptimizeStatus> {
+    return this.http.get<FinancialOptimizeStatus>(`${this.apiUrl}/financial/optimize/status`);
   }
 
   connectStream(): Observable<BackendStreamMessage> {

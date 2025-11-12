@@ -59,6 +59,8 @@ Key frontend pieces:
 
   by sampling separator pressure/temperature/gas-fraction triplets, evaluating the facility surrogate, and adapting the Gaussian mean/std exactly like the pipe-stage optimizer. Every run is persisted to `backend/exports/facility_optimization_latest.{json,xlsx}` with the per-iteration metrics and gradients.
 
+- **Financial surrogate + optimizer** – The third stage consumes facility outputs (vapor fraction, gas/liquid throughput) plus financial levers (price per unit, hedge ratio, opex multiplier) and predicts `net_profit` and `risk_index`. The financial optimizer samples those levers, enforces optional targets on the KPIs, and adapts the Gaussian search. Histories, gradients, and best results are written to `backend/exports/financial_optimization_latest.{json,xlsx}` so you can reload them later.
+
 ## Backend: local development (no Docker required)
 
 ```bash
@@ -85,9 +87,12 @@ The optimizer requires `/simulate` to be called once (POST) before `/optimize` s
 | `/facility/simulate` | POST | Generates a synthetic facility/separator dataset (pipe outputs + separator setpoints) and caches it under `backend/data/facility_latest.json`. |
 | `/facility/train` | POST | Trains the facility surrogate using the cached dataset. Body: `{"epochs": int, "batch_size": int, "learning_rate": float, "val_split": float}`. Stores weights under `backend/artifacts/facility_surrogate.pt`. |
 | `/facility/status` | GET | Indicates whether the facility surrogate is trained, shows dataset size, last-trained timestamp, and loss history. |
-| `/pipeline/run` | POST | Runs the current pipe → facility surrogate chain given `{ "D": float, "v": float, "t": float, "separator_pressure": float, "separator_temp": float, "gas_fraction": float }` and returns both stage outputs. |
+| `/pipeline/run` | POST | Runs the current pipe → facility → financial surrogate chain given `{ "D": float, "v": float, "t": float, "separator_pressure": float, "separator_temp": float, "gas_fraction": float, "price_per_unit": float, "hedge_ratio": float, "opex_multiplier": float }` and returns every stage output. |
+| `/financial/simulate` | POST | Generates a synthetic financial dataset (facility outputs + financial levers → profit/risk) and caches it under `backend/data/financial_latest.json`. |
+| `/financial/train` | POST | Trains the financial surrogate on the cached dataset; saves weights to `backend/artifacts/financial_surrogate.pt`. |
+| `/financial/status` | GET | Reports whether a financial surrogate is loaded, along with dataset size, timestamps, and training history. |
 | `/optimize/history` | GET | Returns the most recent optimization iteration history and summary (each record now includes `du_dx_profile` alongside `u_profile`). |
-| `/optimize` | POST | Launches the Gaussian sampling optimizer. Body: `{"max_iters": int, "population": int, "initial_D": optional, "initial_V": optional}`. Streams iteration updates via WebSocket. |
+| `/optimize` | POST | Launches the Gaussian sampling optimizer. Body: `{"max_iters": int, "population": int, "initial_D": optional, "initial_V": optional, "target_outlet_pressure": optional, "target_mean_pressure": optional, "target_gradient": optional}`. Streams iteration updates via WebSocket. |
 | `/optimize/stop` | POST | Requests early termination of the optimizer loop. |
 | `/status` | GET | Snapshot of the running flag, iteration history, and final result (if available). |
 | `/result` | GET | Final optimized parameters/profile once the optimizer completes; 404 otherwise. |
@@ -174,8 +179,8 @@ All log output (INFO level) is printed directly to the terminal where you run `u
   - Lets the UI/CLI confirm whether the facility surrogate is ready, how large the latest dataset is, and when it was last trained.
 
 - **POST /pipeline/run**
-  - Input: pipe controls (`D`, `v`, `t`) plus facility knobs (`separator_pressure`, `separator_temp`, `gas_fraction`).
-  - Runs the sequential evaluation (pipe surrogate → facility surrogate) and returns both stage outputs as well as the feature vector fed into the facility surrogate. The result is also cached under `state["pipeline_snapshot"]` so the UI can refresh without re-running the API call.
+  - Input: pipe controls (`D`, `v`, `t`), facility knobs (`separator_pressure`, `separator_temp`, `gas_fraction`), and financial knobs (`price_per_unit`, `hedge_ratio`, `opex_multiplier`).
+  - Runs the sequential evaluation (pipe surrogate → facility surrogate → financial surrogate) and returns every stage output plus the feature vectors fed downstream. The result is cached under `state["pipeline_snapshot"]` so the UI can refresh without re-running the API call.
 
 - **POST /facility/optimize**
   - Input: `{ "max_iters": 20, "population": 20, "initial_separator_pressure": 100, "initial_separator_temp": 45, "initial_gas_fraction": 0.5, "target_vapor_fraction": 0.65, "target_gas_flow_rate": 18, "target_liquid_flow_rate": 20, "pipe_D": optional, "pipe_v": optional, "pipe_t": optional }`.
@@ -183,6 +188,23 @@ All log output (INFO level) is printed directly to the terminal where you run `u
 
 - **GET /facility/optimize/status**
   - Returns the latest `{ history, result, pipe_context, timestamp }` bundle so the UI retains facility cost/gradient curves even after restarting the backend.
+
+- **POST /financial/simulate**
+  - Input: `{ "num_samples": int, "seed": optional }`.
+  - Generates synthetic financial datasets (facility outputs + financial levers → profit/risk) and stores them at `backend/data/financial_latest.json`.
+
+- **POST /financial/train**
+  - Input mirrors the other surrogates and retrains `backend/artifacts/financial_surrogate.pt`, logging losses to `backend/artifacts/financial_training_history.json`.
+
+- **GET /financial/status**
+  - Reports whether a financial surrogate is ready, dataset size, timestamps, and training history.
+
+- **POST /financial/optimize**
+  - Input: `{ "max_iters": 20, "population": 20, "initial_price": 80, "initial_hedge": 0.5, "initial_opex": 1.0, "target_net_profit": optional, "target_risk_index": optional, "pipe_D": optional, "pipe_v": optional, "pipe_t": optional, "separator_pressure": optional, "separator_temp": optional, "gas_fraction": optional }`.
+  - Runs the financial-stage optimizer conditioned on the latest pipe/facility outputs. Returns `{ "history": [...], "result": {...}, "facility_context": {...}, "timestamp": ... }` and persists the bundle to `backend/exports/financial_optimization_latest.{json,xlsx}`.
+
+- **GET /financial/optimize/status**
+  - Returns the latest `{ history, result, facility_context, timestamp }` for the financial stage so the UI can reload charts after restarts.
 
 ## Frontend: local development
 
@@ -199,7 +221,7 @@ The UI expects the backend at `http://localhost:8000`. Adjust `BackendService` i
 The dashboard stitches together every API described above so you can inspect the full workflow without touching Swagger:
 
 1. **Controls panel (top-left)** –  
-   - The stage toggle (Pipe ⇄ Facility) swaps the entire knob stack, Actions pane, and chart context. **Pipe mode now exposes only output knobs**—target outlet pressure, target mean pressure, and target outlet gradient—which feed directly into `/optimize` as `target_*` fields. Facility mode exposes separator pressure/temperature/gas sliders (still inputs), the facility objective knobs (target vapor/gas/liquid), and facility optimizer iteration/population sliders.  
+   - The stage toggle (Pipe ⇄ Facility ⇄ Financial) swaps the entire knob stack, Actions pane, and chart context. **Pipe mode now exposes only output knobs**—target outlet pressure, target mean pressure, target outlet gradient, plus the pipe optimizer sliders. Facility mode exposes the facility objective knobs (target vapor/gas/liquid) and the facility optimizer sliders. Financial mode exposes the financial objectives (target profit/risk) and the financial optimizer sliders.  
    - *Simulate & Train* calls `/simulate-train`, regenerating surrogate data, training the network, and refreshing the training-loss chart. In Facility mode, the equivalent **Simulate Facility** / **Train Facility Surrogate** buttons call `/facility/simulate` and `/facility/train`.  
    - *Refresh Status* calls `/surrogate/status`; in Facility mode the surrogate status card switches automatically to `/facility/status`.  
    - *Load Last Run* pulls `/optimize/history`, repopulating the cost chart & profile plot with the most recent pipe-stage optimization logs. Facility mode keeps the same button but displays `/facility/optimize/status` results in the charts.  
@@ -234,6 +256,11 @@ The dashboard stitches together every API described above so you can inspect the
     - The cost chart plots the facility optimizer’s \(J_\text{fac}\) vs. iteration, and the gradient chart shows the three partial derivatives `∂J/∂P`, `∂J/∂T`, and `∂J/∂Gas`.  
     - The Actions pane exposes **Simulate Facility**, **Train Facility Surrogate**, **Run Pipe ➜ Facility**, and **Optimize Facility** (which calls `/facility/optimize`).  
     - The surrogate status card morphs into a facility summary, echoing dataset size/model path plus the most recent best separator settings. The summary includes the timestamp and the pipe context that the optimizer conditioned on, so you can tell which upstream conditions produced the shown optimum.
+
+11. **Financial optimizer view (toggle to “Financial”)** –  
+    - The same chart tiles now highlight financial KPIs: the bar chart shows net profit and risk, the cost chart plots the financial optimizer’s objective, and the gradient chart tracks sensitivities to price/hedge/opex.  
+    - The surrogate panel provides dataset/weights info, quick sliders for the price/hedge/opex presets used when running `/pipeline/run`, and buttons to simulate/train/optimize the financial stage.  
+    - The Actions pane exposes **Optimize Financial**, and the workflow/status strip shows the most recent net profit/risk metrics along with the latest optimization timestamp/context.
 
 #### UI controls & optimization status quick reference
 

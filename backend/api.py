@@ -35,7 +35,19 @@ from facility_optimizer import (
     FacilityOptimizationConfig,
     FacilityOptimizationTargets,
 )
-from pipeline import FacilityControls, PipeControls, run_pipeline
+from financial_surrogate import (
+    FinancialSurrogate,
+    FinancialTrainingConfig,
+    evaluate_financial,
+    generate_financial_dataset,
+    train_financial_surrogate,
+)
+from financial_optimizer import (
+    FinancialGaussianOptimizer,
+    FinancialOptimizationConfig,
+    FinancialTargets,
+)
+from pipeline import FacilityControls, FinancialControls, PipeControls, run_pipeline
 
 
 logger = logging.getLogger("geminus.backend")
@@ -45,16 +57,21 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_JSON = DATA_DIR / "surrogate_latest.json"
 DATA_XLSX = DATA_DIR / "surrogate_latest.xlsx"
 FACILITY_DATA_JSON = DATA_DIR / "facility_latest.json"
+FINANCIAL_DATA_JSON = DATA_DIR / "financial_latest.json"
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 MODEL_PATH = ARTIFACT_DIR / "surrogate_latest.pt"
 TRAINING_LOG_PATH = ARTIFACT_DIR / "surrogate_training_history.json"
 FACILITY_MODEL_PATH = ARTIFACT_DIR / "facility_surrogate.pt"
 FACILITY_TRAINING_LOG_PATH = ARTIFACT_DIR / "facility_training_history.json"
+FINANCIAL_MODEL_PATH = ARTIFACT_DIR / "financial_surrogate.pt"
+FINANCIAL_TRAINING_LOG_PATH = ARTIFACT_DIR / "financial_training_history.json"
 EXPORT_DIR = Path(__file__).resolve().parent / "exports"
 OPT_JSON = EXPORT_DIR / "optimization_latest.json"
 OPT_XLSX = EXPORT_DIR / "optimization_latest.xlsx"
 FACILITY_OPT_JSON = EXPORT_DIR / "facility_optimization_latest.json"
 FACILITY_OPT_XLSX = EXPORT_DIR / "facility_optimization_latest.xlsx"
+FINANCIAL_OPT_JSON = EXPORT_DIR / "financial_optimization_latest.json"
+FINANCIAL_OPT_XLSX = EXPORT_DIR / "financial_optimization_latest.xlsx"
 TARGET_DIFFUSION = 0.12
 TARGET_VELOCITY = 0.65
 
@@ -98,6 +115,22 @@ def _persist_facility_model(model: FacilitySurrogate) -> None:
     logger.info("Facility surrogate weights saved to %s", FACILITY_MODEL_PATH)
 
 
+def _persist_financial_dataset(dataset: Dict[str, np.ndarray]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "inputs": dataset["inputs"].tolist(),
+        "targets": dataset["targets"].tolist(),
+    }
+    FINANCIAL_DATA_JSON.write_text(json.dumps(payload))
+    logger.info("Financial dataset saved to %s", FINANCIAL_DATA_JSON)
+
+
+def _persist_financial_model(model: FinancialSurrogate) -> None:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), FINANCIAL_MODEL_PATH)
+    logger.info("Financial surrogate weights saved to %s", FINANCIAL_MODEL_PATH)
+
+
 def _persist_training_history(history: List[Dict[str, float]]) -> None:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     TRAINING_LOG_PATH.write_text(json.dumps(history, indent=2))
@@ -108,6 +141,12 @@ def _persist_facility_history(history: List[Dict[str, float]]) -> None:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     FACILITY_TRAINING_LOG_PATH.write_text(json.dumps(history, indent=2))
     logger.info("Facility training history saved to %s", FACILITY_TRAINING_LOG_PATH)
+
+
+def _persist_financial_history(history: List[Dict[str, float]]) -> None:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    FINANCIAL_TRAINING_LOG_PATH.write_text(json.dumps(history, indent=2))
+    logger.info("Financial training history saved to %s", FINANCIAL_TRAINING_LOG_PATH)
 
 
 def _persist_optimization_history(history: List[Dict[str, Any]], result: Dict[str, Any]) -> None:
@@ -210,6 +249,60 @@ def _persist_facility_optimization(
     )
 
 
+def _persist_financial_optimization(
+    history: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    facility_context: Dict[str, float],
+    timestamp: str,
+) -> None:
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": timestamp,
+        "facility_context": facility_context,
+        "history": history,
+        "result": result,
+    }
+    FINANCIAL_OPT_JSON.write_text(json.dumps(payload, indent=2))
+    rows = []
+    for rec in history:
+        rows.append(
+            {
+                "iteration": rec["iteration"],
+                "price": rec["price_per_unit"],
+                "hedge_ratio": rec["hedge_ratio"],
+                "opex_multiplier": rec["opex_multiplier"],
+                "cost": rec["cost"],
+                "net_profit": rec["targets"].get("net_profit"),
+                "risk_index": rec["targets"].get("risk_index"),
+                "dJ_dPrice": rec["gradients"].get("dJ_dPrice"),
+                "dJ_dHedge": rec["gradients"].get("dJ_dHedge"),
+                "dJ_dOpex": rec["gradients"].get("dJ_dOpex"),
+            }
+        )
+    df = pd.DataFrame(rows)
+    summary = pd.DataFrame(
+        [
+            {
+                "best_price": result["best_controls"]["price_per_unit"],
+                "best_hedge": result["best_controls"]["hedge_ratio"],
+                "best_opex": result["best_controls"]["opex_multiplier"],
+                "best_cost": result["best_cost"],
+                "best_net_profit": result["best_targets"].get("net_profit"),
+                "best_risk_index": result["best_targets"].get("risk_index"),
+            }
+        ]
+    )
+    with pd.ExcelWriter(FINANCIAL_OPT_XLSX) as writer:
+        df.to_excel(writer, sheet_name="iterations", index=False)
+        summary.to_excel(writer, sheet_name="summary", index=False)
+    logger.info(
+        "Financial optimization history saved to %s and %s (%d iterations)",
+        FINANCIAL_OPT_JSON,
+        FINANCIAL_OPT_XLSX,
+        len(history),
+    )
+
+
 def _build_reference_state(sim_cfg: SimulationConfig) -> Dict[str, Any]:
     target_sim = run_simulation(TARGET_DIFFUSION, TARGET_VELOCITY, sim_cfg)
     return {
@@ -277,6 +370,14 @@ def _ensure_facility_ready() -> bool:
     return True
 
 
+def _ensure_financial_ready() -> bool:
+    try:
+        _get_financial_surrogate_or_load()
+    except HTTPException:
+        return False
+    return True
+
+
 def _load_persisted_dataset() -> Dict[str, np.ndarray]:
     if not DATA_JSON.exists():
         raise HTTPException(status_code=404, detail="No persisted dataset found. Run /simulate or provide dataset payload.")
@@ -293,6 +394,18 @@ def _load_facility_dataset() -> Dict[str, np.ndarray]:
         targets = np.array(payload["targets"], dtype=np.float32)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=f"Facility dataset missing key: {exc}") from exc
+    return {"inputs": inputs, "targets": targets}
+
+
+def _load_financial_dataset() -> Dict[str, np.ndarray]:
+    if not FINANCIAL_DATA_JSON.exists():
+        raise HTTPException(status_code=404, detail="No financial dataset available. Run /financial/simulate first.")
+    payload = json.loads(FINANCIAL_DATA_JSON.read_text())
+    try:
+        inputs = np.array(payload["inputs"], dtype=np.float32)
+        targets = np.array(payload["targets"], dtype=np.float32)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Financial dataset missing key: {exc}") from exc
     return {"inputs": inputs, "targets": targets}
 
 
@@ -426,6 +539,20 @@ def _get_facility_surrogate_or_load() -> FacilitySurrogate:
     return model
 
 
+def _get_financial_surrogate_or_load() -> FinancialSurrogate:
+    financial = state.get("financial_surrogate")
+    if financial is not None:
+        return financial
+    if not FINANCIAL_MODEL_PATH.exists():
+        raise HTTPException(status_code=404, detail="No financial surrogate available. Train it first.")
+    model = FinancialSurrogate()
+    model.load_state_dict(torch.load(FINANCIAL_MODEL_PATH, map_location="cpu"))
+    model.eval()
+    state["financial_surrogate"] = model
+    logger.info("Loaded financial surrogate weights from %s", FINANCIAL_MODEL_PATH)
+    return model
+
+
 class StreamBroker:
     """Minimal pub/sub helper for WebSocket clients."""
 
@@ -516,6 +643,9 @@ class PipelineRunRequest(BaseModel):
     separator_pressure: float = 100.0
     separator_temp: float = 45.0
     gas_fraction: float = 0.5
+    price_per_unit: float = 80.0
+    hedge_ratio: float = 0.5
+    opex_multiplier: float = 1.0
 
 
 class FacilityOptimizeRequest(BaseModel):
@@ -542,6 +672,51 @@ class FacilityOptimizeStatusResponse(BaseModel):
     timestamp: Optional[str]
 
 
+class FinancialSimulateRequest(BaseModel):
+    num_samples: int = 2000
+    seed: Optional[int] = None
+
+
+class FinancialTrainRequest(BaseModel):
+    epochs: int = 150
+    batch_size: int = 256
+    learning_rate: float = 1e-3
+    val_split: float = 0.2
+
+
+class FinancialStatusResponse(BaseModel):
+    has_model: bool
+    model_path: Optional[str]
+    dataset_size: Optional[int]
+    last_trained_at: Optional[str]
+    training_history: Optional[List[Dict[str, Any]]]
+
+
+class FinancialOptimizeRequest(BaseModel):
+    max_iters: int = 20
+    population: int = 20
+    initial_price: Optional[float] = None
+    initial_hedge: Optional[float] = None
+    initial_opex: Optional[float] = None
+    target_net_profit: Optional[float] = None
+    target_risk_index: Optional[float] = None
+    weight_profit: float = 1.0
+    weight_risk: float = 0.5
+    pipe_D: Optional[float] = None
+    pipe_v: Optional[float] = None
+    pipe_t: Optional[float] = None
+    separator_pressure: Optional[float] = None
+    separator_temp: Optional[float] = None
+    gas_fraction: Optional[float] = None
+
+
+class FinancialOptimizeStatusResponse(BaseModel):
+    history: List[Dict[str, Any]]
+    result: Optional[Dict[str, Any]]
+    facility_context: Optional[Dict[str, float]]
+    timestamp: Optional[str]
+
+
 app = FastAPI(title="Dummy Geminus Optimization API")
 app.add_middleware(
     CORSMiddleware,
@@ -559,6 +734,8 @@ state: Dict[str, Any] = {
     "surrogate": None,
     "facility_dataset": None,
     "facility_surrogate": None,
+    "financial_dataset": None,
+    "financial_surrogate": None,
     "target_profile": None,
     "target_time": None,
     "x_grid": None,
@@ -579,6 +756,12 @@ state: Dict[str, Any] = {
     "facility_opt_result": None,
     "facility_opt_pipe_context": None,
     "facility_opt_timestamp": None,
+    "financial_training_history": None,
+    "financial_last_trained_at": None,
+    "financial_opt_history": [],
+    "financial_opt_result": None,
+    "financial_opt_context": None,
+    "financial_opt_timestamp": None,
 }
 
 
@@ -656,6 +839,72 @@ async def facility_status() -> FacilityStatusResponse:
     return FacilityStatusResponse(
         has_model=has_model,
         model_path=str(FACILITY_MODEL_PATH) if FACILITY_MODEL_PATH.exists() else None,
+        dataset_size=dataset_size,
+        last_trained_at=last_trained_at,
+        training_history=history,
+    )
+
+
+@app.post("/financial/simulate")
+async def financial_simulate(request: FinancialSimulateRequest) -> Dict[str, Any]:
+    dataset = generate_financial_dataset(request.num_samples, seed=request.seed)
+    _persist_financial_dataset(dataset)
+    state["financial_dataset"] = dataset
+    logger.info("/financial/simulate generated %s samples", len(dataset["inputs"]))
+    return {"message": "financial dataset generated", "dataset_size": len(dataset["inputs"])}
+
+
+@app.post("/financial/train")
+async def financial_train(request: FinancialTrainRequest) -> Dict[str, Any]:
+    dataset = state.get("financial_dataset")
+    if dataset is None:
+        dataset = _load_financial_dataset()
+        state["financial_dataset"] = dataset
+
+    cfg = FinancialTrainingConfig(
+        epochs=request.epochs,
+        batch_size=request.batch_size,
+        learning_rate=request.learning_rate,
+        val_split=request.val_split,
+    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    cfg.device = device
+    model, history = train_financial_surrogate(dataset, cfg)
+    _persist_financial_model(model)
+    _persist_financial_history(history)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    state["financial_surrogate"] = model
+    state["financial_training_history"] = history
+    state["financial_last_trained_at"] = timestamp
+    logger.info("Financial surrogate trained on %s samples", len(dataset["inputs"]))
+    return {
+        "dataset_size": len(dataset["inputs"]),
+        "training_history": history,
+        "last_trained_at": timestamp,
+    }
+
+
+@app.get("/financial/status", response_model=FinancialStatusResponse)
+async def financial_status() -> FinancialStatusResponse:
+    dataset = state.get("financial_dataset")
+    if dataset is not None:
+        dataset_size = len(dataset["inputs"])
+    elif FINANCIAL_DATA_JSON.exists():
+        payload = json.loads(FINANCIAL_DATA_JSON.read_text())
+        dataset_size = len(payload.get("inputs", []))
+    else:
+        dataset_size = None
+    history = state.get("financial_training_history")
+    if history is None and FINANCIAL_TRAINING_LOG_PATH.exists():
+        history = json.loads(FINANCIAL_TRAINING_LOG_PATH.read_text())
+        state["financial_training_history"] = history
+    last_trained_at = state.get("financial_last_trained_at")
+    if last_trained_at is None and FINANCIAL_TRAINING_LOG_PATH.exists():
+        last_trained_at = datetime.fromtimestamp(FINANCIAL_TRAINING_LOG_PATH.stat().st_mtime, tz=timezone.utc).isoformat()
+    has_model = FINANCIAL_MODEL_PATH.exists() or state.get("financial_surrogate") is not None
+    return FinancialStatusResponse(
+        has_model=has_model,
+        model_path=str(FINANCIAL_MODEL_PATH) if FINANCIAL_MODEL_PATH.exists() else None,
         dataset_size=dataset_size,
         last_trained_at=last_trained_at,
         training_history=history,
@@ -760,6 +1009,132 @@ async def facility_optimize_status() -> FacilityOptimizeStatusResponse:
     )
 
 
+@app.post("/financial/optimize")
+async def financial_optimize(request: FinancialOptimizeRequest) -> Dict[str, Any]:
+    _ensure_ready()
+    if not _ensure_facility_ready():
+        raise HTTPException(status_code=400, detail="Facility surrogate not ready. Train it first.")
+    if not _ensure_financial_ready():
+        raise HTTPException(status_code=400, detail="Financial surrogate not ready. Train it first.")
+
+    defaults = state.get("target_params") or {"D": TARGET_DIFFUSION, "v": TARGET_VELOCITY}
+    pipe_D = request.pipe_D if request.pipe_D is not None else defaults.get("D", TARGET_DIFFUSION)
+    pipe_v = request.pipe_v if request.pipe_v is not None else defaults.get("v", TARGET_VELOCITY)
+    pipe_t = request.pipe_t if request.pipe_t is not None else state.get("target_time") or 0.6
+
+    facility_controls = FacilityControls(
+        separator_pressure=request.separator_pressure or 100.0,
+        separator_temp=request.separator_temp or 45.0,
+        gas_fraction=request.gas_fraction or 0.5,
+    )
+    pipe_controls = PipeControls(diffusion=pipe_D, velocity=pipe_v, time=pipe_t)
+    financial_controls = FinancialControls(
+        price_per_unit=request.initial_price or 80.0,
+        hedge_ratio=request.initial_hedge or 0.5,
+        opex_multiplier=request.initial_opex or 1.0,
+    )
+
+    if state.get("x_grid") is None:
+        reference = _build_reference_state(state["simulation_config"])
+        _apply_reference_state(reference)
+    x_grid = np.array(state["x_grid"], dtype=np.float32)
+
+    pipe_model = _get_surrogate_or_load()
+    facility_model = _get_facility_surrogate_or_load()
+    financial_model = _get_financial_surrogate_or_load()
+
+    snapshot = run_pipeline(
+        pipe_controls,
+        facility_controls,
+        financial_controls,
+        pipe_model,
+        facility_model,
+        financial_model,
+        x_grid,
+    )
+    facility_stage = snapshot.get("facility")
+    if facility_stage is None:
+        raise HTTPException(status_code=500, detail="Facility stage evaluation failed")
+    facility_context = {
+        "vapor_fraction": facility_stage["vapor_fraction"],
+        "gas_flow_rate": facility_stage["gas_flow_rate"],
+        "liquid_flow_rate": facility_stage["liquid_flow_rate"],
+    }
+
+    cfg = FinancialOptimizationConfig(
+        max_iters=request.max_iters,
+        population=request.population,
+        init_mean=(
+            request.initial_price or financial_controls.price_per_unit,
+            request.initial_hedge or financial_controls.hedge_ratio,
+            request.initial_opex or financial_controls.opex_multiplier,
+        ),
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    targets = FinancialTargets(
+        net_profit=request.target_net_profit,
+        risk_index=request.target_risk_index,
+        weight_profit=request.weight_profit,
+        weight_risk=request.weight_risk,
+    )
+    optimizer = FinancialGaussianOptimizer(financial_model, facility_context, cfg, targets)
+    result = optimizer.run()
+    history_payload = [
+        {
+            "iteration": rec.iteration,
+            "price_per_unit": rec.price_per_unit,
+            "hedge_ratio": rec.hedge_ratio,
+            "opex_multiplier": rec.opex_multiplier,
+            "cost": rec.cost,
+            "targets": rec.targets,
+            "gradients": rec.gradients,
+        }
+        for rec in result.history
+    ]
+    result_payload = {
+        "best_controls": result.best_controls,
+        "best_cost": result.best_cost,
+        "best_targets": result.best_targets,
+    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+    state["financial_opt_history"] = history_payload
+    state["financial_opt_result"] = result_payload
+    state["financial_opt_context"] = facility_context
+    state["financial_opt_timestamp"] = timestamp
+    _persist_financial_optimization(history_payload, result_payload, facility_context, timestamp)
+    return {
+        "message": "financial optimization complete",
+        "history": history_payload,
+        "result": result_payload,
+        "facility_context": facility_context,
+        "timestamp": timestamp,
+    }
+
+
+@app.get("/financial/optimize/status", response_model=FinancialOptimizeStatusResponse)
+async def financial_optimize_status() -> FinancialOptimizeStatusResponse:
+    history = state.get("financial_opt_history") or []
+    result = state.get("financial_opt_result")
+    context = state.get("financial_opt_context")
+    timestamp = state.get("financial_opt_timestamp")
+    if not history and FINANCIAL_OPT_JSON.exists():
+        payload = json.loads(FINANCIAL_OPT_JSON.read_text())
+        history = payload.get("history", [])
+        result = payload.get("result")
+        context = payload.get("facility_context")
+        timestamp = payload.get("timestamp")
+        state["financial_opt_history"] = history
+        state["financial_opt_result"] = result
+        state["financial_opt_context"] = context
+        state["financial_opt_timestamp"] = timestamp
+    return FinancialOptimizeStatusResponse(
+        history=history,
+        result=result,
+        facility_context=context,
+        timestamp=timestamp,
+    )
+
+
 @app.post("/pipeline/run")
 async def pipeline_run(request: PipelineRunRequest) -> Dict[str, Any]:
     if not _ensure_surrogate_ready():
@@ -778,10 +1153,24 @@ async def pipeline_run(request: PipelineRunRequest) -> Dict[str, Any]:
         separator_temp=request.separator_temp,
         gas_fraction=request.gas_fraction,
     )
+    financial_controls = FinancialControls(
+        price_per_unit=request.price_per_unit,
+        hedge_ratio=request.hedge_ratio,
+        opex_multiplier=request.opex_multiplier,
+    )
 
     pipe_model = _get_surrogate_or_load()
     facility_model = _get_facility_surrogate_or_load()
-    result = run_pipeline(pipe_controls, facility_controls, pipe_model, facility_model, x_grid)
+    financial_model = _get_financial_surrogate_or_load() if _ensure_financial_ready() else None
+    result = run_pipeline(
+        pipe_controls,
+        facility_controls,
+        financial_controls,
+        pipe_model,
+        facility_model,
+        financial_model,
+        x_grid,
+    )
     state["pipeline_snapshot"] = result
     return {"message": "pipeline evaluated", **result}
 
