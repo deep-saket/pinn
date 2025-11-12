@@ -1,6 +1,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+*.jpeg
 
 # Python build artifacts
 __pycache__/
